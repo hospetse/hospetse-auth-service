@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserAuthStatus {
+  pending_provisioning
+  active
+
+  @@map("user_auth_status_enum")
+}
+
+model EmailVerification {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @db.VarChar(255)
+  pinHash       String    @map("pin_hash") @db.VarChar(255)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(3)
+  attempts      Int       @default(0)
+  consumedAt    DateTime? @map("consumed_at") @db.Timestamptz(3)
+  invalidatedAt DateTime? @map("invalidated_at") @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@index([email, createdAt])
+  @@index([expiresAt])
+  @@map("email_verification")
+}
+
+model UserAuth {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String         @unique @db.VarChar(255)
+  passwordHash  String         @map("password_hash") @db.VarChar(255)
+  status        UserAuthStatus @default(pending_provisioning)
+  provisionedAt DateTime?      @map("provisioned_at") @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  refreshTokens RefreshToken[]
+
+  @@map("user_auth")
+}
+
+model RefreshToken {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userAuthId String    @map("user_auth_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(255)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt  DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  userAuth   UserAuth  @relation(fields: [userAuthId], references: [id], onDelete: Cascade)
+
+  @@index([userAuthId])
+  @@map("refresh_token")
+}
