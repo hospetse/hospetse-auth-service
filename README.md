@@ -4,11 +4,91 @@ Serviço de autenticação do Hospetse, separado do back-end principal e com ban
 
 Responsável por confirmar o e-mail com PIN no primeiro cadastro, criar a identidade, proteger a senha e emitir os tokens (JWT). O back-end principal nunca recebe nem armazena senha.
 
-Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01).
+Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01). Base do projeto e banco: Task #250 (HSP-PBI-078-TSK-02).
+
+## Estado atual
+
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migration `init`), rota `GET /health` e teste automatizado do health.
+- Ainda não implementado: as rotas de autenticação descritas em [Rotas](#rotas). Elas são o contrato que as próximas Tasks implementam.
+
+## Stack
+
+- Node.js 20.12+ (usa `process.loadEnvFile`), ES Modules
+- Express 5
+- Prisma 6.19.0 (versão fixa, igual ao back-end) + PostgreSQL
+- Testes: `node:test` + axios
+- Lint: ESLint (mesma configuração do back-end)
+
+## Primeira execução
+
+Pré-requisito: acesso à `DATABASE_URL` do banco do Auth Server (instância própria no Railway). A URL fica só no `.env`.
+
+```bash
+npm install
+cp .env.example .env          # preencher DATABASE_URL e PORT
+npx prisma migrate deploy     # aplica as migrations no banco
+npx prisma generate           # gera o Prisma Client
+npm run dev
+```
+
+Conferir: `GET http://localhost:<PORT>/health` deve responder `200`.
+
+### Variáveis de ambiente
+
+| Variável | Descrição |
+| --- | --- |
+| `DATABASE_URL` | URL de conexão do PostgreSQL do Auth Server |
+| `PORT` | Porta do servidor |
+
+O `.env` não é versionado. Se ele não existir (deploy, CI), o `index.js` segue sem quebrar e usa as variáveis já definidas no ambiente; qualquer outro erro ao ler o arquivo interrompe a inicialização.
+
+### Scripts
+
+| Comando | O que faz |
+| --- | --- |
+| `npm start` | Sobe o servidor (`node index.js`) |
+| `npm run dev` | Sobe com nodemon (reinicia ao salvar) |
+| `npm test` | Roda os testes (`node --test`) |
+| `npm run lint` | Roda o ESLint |
+
+### Estrutura
+
+```text
+index.js                 carrega o .env e sobe o servidor
+src/app.js               app Express e rotas (exportado para os testes)
+src/lib/prisma.js        instância única do PrismaClient
+prisma/schema.prisma     modelos do banco
+prisma/migrations/       histórico de migrations (versionado)
+prisma.config.ts         configuração do Prisma CLI
+test/app.test.js         testes de integração
+```
+
+### Banco e migrations
+
+O banco é exclusivo do Auth Server, então em desenvolvimento dá para criar migrations com `npx prisma migrate dev --name <nome>` depois de alterar o `schema.prisma`. Antes, confirmar que a `DATABASE_URL` aponta para o banco do Auth, e não para o do back-end. Em deploy, usar só `npx prisma migrate deploy`.
+
+Para checar a conexão pelo terminal:
+
+```bash
+echo "SELECT 1;" | npx prisma db execute --stdin --schema prisma/schema.prisma
+```
+
+### Health check
+
+`GET /health` executa um `SELECT` no banco:
+
+| Status | Caso |
+| --- | --- |
+| `200` | Servidor e banco respondendo |
+| `503` | Servidor de pé, banco indisponível (detalhe do erro só no log) |
+
+### Testes
+
+`test/app.test.js` sobe o app numa porta aleatória (`app.listen(0)`), chama o `/health` e confere status e corpo. Como o health consulta o banco, o teste também prova a conexão (precisa do `.env` válido). O `after()` fecha o servidor e a conexão do Prisma ao final.
 
 ## Visão geral
 
-```
+```text
 Front-end ──(rotas públicas)──> Auth Server ──(rota interna)──> Back-end principal
                                     │                                 │
                                Postgres (Auth)                  Postgres (back-end)
@@ -160,7 +240,7 @@ Se o PIN expirar antes de dar certo, o usuário pede um PIN novo pelo `request-p
 
 ## Modelo de dados
 
-Banco PostgreSQL próprio, acessado via Prisma. Três tabelas: `email_verification` não tem FK, porque a verificação acontece antes da identidade existir e o vínculo é o e-mail; `refresh_token` pertence a uma `user_auth`.
+Banco PostgreSQL próprio, acessado via Prisma. Definido em `prisma/schema.prisma` e criado pela migration `init`. Três tabelas: `email_verification` não tem FK, porque a verificação acontece antes da identidade existir e o vínculo é o e-mail; `refresh_token` pertence a uma `user_auth`.
 
 ### `email_verification`
 
@@ -220,15 +300,16 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 
 ## Decisões técnicas
 
+- **Banco:** instância PostgreSQL própria no Railway, separada da do back-end (isolamento do microserviço).
+- **ORM:** Prisma 6.19.0 com versão exata (sem `^`), gerador `prisma-client-js`, igual ao back-end. Atualizar para a 7 só junto com o back-end, numa Task própria.
 - **Hash da senha:** Argon2id, pacote `argon2` (Task #54).
 - **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
 - **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio.
 
-### Pendente [TBD]
+### Pendente (TBD)
 
 - Tamanho do PIN, tempo de expiração, limite de tentativas e intervalo de reenvio (serão variáveis de ambiente).
-- Onde o banco roda (instância própria no Railway ou schema separado).
 - Expiração do access token (~15 min, conforme #56) e do refresh token.
 - Se o refresh token é rotacionado (trocado por um novo) a cada renovação.
 - Onde fica o registro de aceite dos termos.
