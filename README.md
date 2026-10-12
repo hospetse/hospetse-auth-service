@@ -1,20 +1,240 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+# Hospetse — Auth Server
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+Serviço de autenticação do Hospetse, separado do back-end principal e com banco próprio.
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+Responsável por confirmar o e-mail com PIN no primeiro cadastro, criar a identidade, proteger a senha e emitir os tokens (JWT). O back-end principal nunca recebe nem armazena senha.
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01).
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+## Visão geral
+
+```
+Front-end ──(rotas públicas)──> Auth Server ──(rota interna)──> Back-end principal
+                                    │                                 │
+                               Postgres (Auth)                  Postgres (back-end)
+```
+
+- **Auth Server:** e-mail, senha (hash), PIN e refresh tokens. Assina os JWT com a chave privada (RS256).
+- **Back-end principal:** USER, TUTOR e o resto do domínio. Valida os JWT com a chave pública e identifica o USER pelo `sub` (`auth_user_id`).
+- O JWT só é emitido depois que o back-end confirma a criação do USER.
+- O Auth Server não guarda dados de perfil. O nome e o celular são informados depois, na conclusão do perfil do Tutor, direto no back-end.
+
+### Fluxo de cadastro
+
+1. **Tela de e-mail + senha:** o front chama `request-pin` e guarda a senha em memória. O usuário recebe o PIN por e-mail.
+2. **Tela de PIN:** o front chama `register` com `challengeId`, PIN e a senha guardada. Se o PIN estiver errado, o erro aparece nesta tela.
+3. O Auth Server consome o PIN, cria a `user_auth` (`pending_provisioning`) e chama a rota interna do back-end, que cria o USER (`account_type = tutor`).
+4. Com a confirmação do back-end, o Auth marca a `user_auth` como `active` e devolve access token + refresh token.
+5. **Tela logada:** a conclusão do perfil (nome, celular) é obrigatória para usar o app e fica no back-end (outra PBI). Até lá, o usuário é um USER sem TUTOR ("perfil incompleto").
+
+## Rotas
+
+Padrão (#56): prefixo `/api/v1/`, envelope de resposta e erro padronizado. Ações usam `POST` com o verbo no caminho.
+
+### Status HTTP usados
+
+| Código | Quando |
+| --- | --- |
+| `200 OK` | Deu certo e devolve um resultado |
+| `201 Created` | Criou algo novo |
+| `400 Bad Request` | Payload inválido (validação Joi) |
+| `401 Unauthorized` | Credencial ou token inválido |
+| `404 Not Found` | Recurso não existe |
+| `409 Conflict` | Conflito, ex.: e-mail já cadastrado |
+| `410 Gone` | O recurso existia, mas não vale mais (PIN expirado, consumido ou invalidado) |
+| `429 Too Many Requests` | Excedeu tentativas ou reenvios |
+| `500 Internal Server Error` | Erro inesperado |
+| `503 Service Unavailable` | Dependência (back-end) indisponível |
+
+### `POST /api/v1/auth/request-pin`
+
+Gera um PIN, envia por e-mail e cria uma `email_verification`.
+
+Request:
+
+```json
+{ "email": "tutor@exemplo.com" }
+```
+
+| Status | Caso | Body |
+| --- | --- | --- |
+| `201` | PIN enviado | `{ "challengeId": "uuid" }` |
+| `400` | E-mail inválido | erro padrão |
+| `409` | E-mail já cadastrado em `user_auth` com status `active` | erro padrão (front redireciona para o login) |
+| `429` | Pediu reenvio antes do intervalo mínimo | erro padrão |
+
+- E-mail com `user_auth` em `pending_provisioning` não é duplicado: pode pedir PIN novo (ver [Retentativa](#retentativa)).
+- Gerar um PIN novo invalida o anterior do mesmo e-mail (`invalidated_at`).
+- O `challengeId` não aparece na tela; o front guarda até o `register`.
+
+### `POST /api/v1/auth/register`
+
+Valida o PIN, cria a `user_auth`, chama a rota interna do back-end e emite os tokens.
+
+Request:
+
+```json
+{
+  "challengeId": "uuid",
+  "pin": "012345",
+  "password": "...",
+  "passwordConfirmation": "...",
+  "acceptedTerms": true
+}
+```
+
+O e-mail não vem no payload: ele vem da `email_verification`. O PIN é string (preserva zeros à esquerda).
+
+| Status | Caso | Body |
+| --- | --- | --- |
+| `201` | Conta criada e USER confirmado no back-end | access token + refresh token |
+| `400` | Payload inválido, senhas diferentes ou termos não aceitos | erro padrão |
+| `401` | PIN errado (incrementa `attempts`) | erro padrão |
+| `404` | `challengeId` não existe | erro padrão |
+| `409` | E-mail já cadastrado com `user_auth` `active` (inclui corrida: `UNIQUE` / Prisma P2002) | erro padrão |
+| `410` | PIN expirado, invalidado ou consumido (exceto na retentativa) | erro padrão |
+| `429` | Limite de tentativas atingido | erro padrão |
+| `503` | Back-end não confirmou a criação do USER | erro padrão |
+
+### `POST /api/v1/auth/refresh`
+
+Troca um refresh token válido por um novo access token.
+
+Request: refresh token (mobile no body; web no cookie httpOnly, conforme ADR-005).
+
+| Status | Caso | Body |
+| --- | --- | --- |
+| `200` | Token válido | access token (e novo refresh, se houver rotação) |
+| `401` | Refresh inválido, expirado ou revogado | erro padrão |
+
+### `POST /api/v1/auth/login` (fora da #244)
+
+Fica para outra PBI. Sucesso: `200` + tokens. Credencial inválida: `401`.
+
+### Rota interna (no back-end principal): `PUT /api/v1/internal/users/{authUserId}`
+
+Chamada só pelo Auth Server, depois de criar a `user_auth`. Não é usada pelo front.
+
+`PUT` porque é idempotente: chamar de novo após um timeout não cria um segundo USER. O `authUserId` vai no caminho porque é o Auth que define o id.
+
+Request:
+
+```json
+{ "email": "tutor@exemplo.com" }
+```
+
+Autenticação: token de serviço (JWT curto assinado pelo Auth com a chave privada RS256, `aud: "hospetse-backend-internal"`). O back-end valida com a chave pública que já tem. A claim `aud` impede o uso de um token de usuário nesta rota.
+
+| Status | Caso |
+| --- | --- |
+| `201` | USER criado agora (`account_type = tutor`) |
+| `200` | USER já existia para esse `authUserId` (retentativa) |
+| `401` | Token de serviço ausente ou inválido |
+| `409` | E-mail já usado por outro USER |
+
+## Tratamento de falhas no `register`
+
+O PIN é consumido e a `user_auth` é criada (`pending_provisioning`) antes da chamada ao back-end. Se a chamada falhar, essa linha continua lá.
+
+| Resposta do back-end | Auth Server faz | Front recebe |
+| --- | --- | --- |
+| `201` ou `200` | Marca `active`, preenche `provisioned_at`, emite tokens | `201` + tokens |
+| `409` | Mantém `pending_provisioning` e registra o erro | `409` |
+| `401` | Erro de configuração; registra o erro | `503` |
+| Timeout ou `5xx` | Retenta dentro da requisição; se todas falharem, mantém `pending_provisioning` | `503` |
+
+### Retentativa
+
+Duas camadas:
+
+1. **Auth retenta dentro da requisição:** poucas tentativas do `PUT`, com espera curta entre elas, antes de devolver `503`. Seguro porque o `PUT` é idempotente. Cobre falhas rápidas (deploy, oscilação de rede).
+2. **Front oferece "tentar de novo":** se ainda vier `503`, o front reenvia o `register` com o mesmo `challengeId`, PIN e senha.
+
+Regra do `register` para a retentativa: se a `user_auth` do e-mail está em `pending_provisioning`, o `register` aceita o mesmo `challengeId` + PIN de novo, desde que o PIN não tenha expirado. Nesse caso:
+
+- não cria outra `user_auth`: reaproveita a linha existente (mesmo `auth_user_id`, mantém o vínculo caso o back-end já tenha criado o USER);
+- atualiza a senha com a enviada;
+- chama o `PUT` do back-end de novo; com `201`/`200`, marca `active` e emite os tokens.
+
+Se o PIN expirar antes de dar certo, o usuário pede um PIN novo pelo `request-pin` (permitido porque o status é `pending_provisioning`) e refaz o fluxo, caindo na mesma regra.
+
+## Modelo de dados
+
+Banco PostgreSQL próprio, acessado via Prisma. Três tabelas: `email_verification` não tem FK, porque a verificação acontece antes da identidade existir e o vínculo é o e-mail; `refresh_token` pertence a uma `user_auth`.
+
+### `email_verification`
+
+Confirma que quem está se cadastrando é dono do e-mail. Cada linha é um PIN enviado (o `id` é o `challengeId` devolvido ao cliente).
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `id` | UUID, PK | `challengeId`, gerado pelo banco |
+| `email` | VARCHAR(255) | Normalizado (trim + minúsculas) |
+| `pin_hash` | VARCHAR(255) | HMAC-SHA256 do PIN com chave secreta. O PIN original nunca é salvo |
+| `expires_at` | TIMESTAMPTZ | PIN expirado é rejeitado |
+| `attempts` | INT, default 0 | Tentativas erradas; acima do limite, o PIN é bloqueado |
+| `consumed_at` | TIMESTAMPTZ, nulo | Preenchido quando o PIN é usado; impede reutilização |
+| `invalidated_at` | TIMESTAMPTZ, nulo | Preenchido quando um novo PIN é solicitado para o mesmo e-mail |
+| `created_at` | TIMESTAMPTZ | Também controla o intervalo mínimo entre reenvios |
+
+Índices: `(email, created_at)` para localizar a verificação mais recente do e-mail; `(expires_at)` para limpeza das vencidas.
+
+### `user_auth`
+
+Identidade autenticável, usada no cadastro e no login.
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `id` | UUID, PK | `auth_user_id`. Vai no `sub` do JWT e é enviado ao back-end principal |
+| `email` | VARCHAR(255), UNIQUE | Normalizado. O índice único impede e-mail duplicado |
+| `password_hash` | VARCHAR(255) | Hash seguro da senha. A senha original nunca é salva |
+| `status` | ENUM | `pending_provisioning` (USER ainda não confirmado pelo back-end) ou `active` |
+| `provisioned_at` | TIMESTAMPTZ, nulo | Quando o back-end confirmou a criação do USER |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | |
+
+O Auth Server não guarda referência ao USER: o back-end principal guarda o `auth_user_id` e localiza o USER pelo `sub` do JWT.
+
+O cadastro recebe só `challengeId`, PIN, senha, confirmação de senha e aceites; o e-mail vem da `email_verification`. Ao back-end principal são enviados apenas `auth_user_id` e e-mail confirmado.
+
+### `refresh_token`
+
+Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acesso.
+
+| Coluna | Tipo | Observação |
+| --- | --- | --- |
+| `id` | UUID, PK | Gerado pelo banco |
+| `user_auth_id` | UUID, FK → `user_auth.id` | Dono do token |
+| `token_hash` | VARCHAR(255), UNIQUE | Hash do refresh token. O token original nunca é salvo |
+| `expires_at` | TIMESTAMPTZ | Refresh token expirado é rejeitado |
+| `revoked_at` | TIMESTAMPTZ, nulo | Preenchido na revogação (ex.: logout); token revogado é rejeitado |
+| `created_at` | TIMESTAMPTZ | |
+
+Índices: `UNIQUE (token_hash)` para localizar o token na renovação; `(user_auth_id)` para revogar todos os tokens de um usuário.
+
+### Regras importantes
+
+- Consumir o PIN e criar a `user_auth` acontecem na mesma transação.
+- O PIN é consumido com update condicional (`WHERE consumed_at IS NULL AND invalidated_at IS NULL AND expires_at > now()`), para que duas requisições simultâneas não usem o mesmo PIN. A exceção é a [retentativa](#retentativa) com `user_auth` em `pending_provisioning`.
+- PIN, senha e segredos nunca aparecem em logs.
+
+## Decisões técnicas
+
+- **Hash da senha:** Argon2id, pacote `argon2` (Task #54).
+- **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
+- **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
+- **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio.
+
+### Pendente [TBD]
+
+- Tamanho do PIN, tempo de expiração, limite de tentativas e intervalo de reenvio (serão variáveis de ambiente).
+- Onde o banco roda (instância própria no Railway ou schema separado).
+- Expiração do access token (~15 min, conforme #56) e do refresh token.
+- Se o refresh token é rotacionado (trocado por um novo) a cada renovação.
+- Onde fica o registro de aceite dos termos.
+- Se a checagem de e-mail duplicado fica no `request-pin` (como acima) ou numa rota separada. Em ambos os casos, precisa de rate limit.
+- Se `passwordConfirmation` vai para a API ou fica só no front.
+- Formato exato do erro padrão (#56) e lista de códigos de erro.
+- Claims do JWT de usuário (`sub`, `iss`, `aud`, `iat`, `exp`).
+- Timeout por tentativa e número de retentativas do Auth na chamada da rota interna (manter baixo: o usuário espera a resposta).
+- User agent / dados do dispositivo na sessão (depois).
