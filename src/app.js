@@ -1,6 +1,7 @@
 import { createRequestPinController } from "./email-verification/email-verification.controller.js";
 import { prisma } from "./lib/prisma.js";
 import express from "express";
+import { createRegisterController } from "./user-auth/user-auth.controller.js";
 
 export function createApp({ emailSender }) {
     const app = express();
@@ -25,8 +26,8 @@ export function createApp({ emailSender }) {
         }
     });
 
-    app.post('/api/v1/auth/request-pin', createRequestPinController(emailSender))
-
+    app.post('/api/v1/auth/request-pin', createRequestPinController(emailSender));
+    app.post('/api/v1/auth/register', createRegisterController());
     return app
 }
 

@@ -12,7 +12,7 @@ function generatePin() {
     return PIN;
 };
 
-function hashPin(pin) {
+export function hashPin(pin) {
     const secret = process.env.PIN_HMAC_SECRET;
     if (!secret) {
         throw new Error('PIN.HMAC_SECRET não configurada')
