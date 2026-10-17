@@ -22,6 +22,11 @@ function hashPin(pin) {
 
 export async function requestPinService(email, emailSender) {
 
+    const userAuthActive = await prisma.userAuth.findUnique({
+        where: { email, status: 'active'}
+    })
+    if (userAuthActive) { throw new AppError("Usuário já ativo", 409)}
+
     const lastChallenge = await prisma.emailVerification.findFirst({
         where: { email },
         orderBy: { createdAt: 'desc' },
