@@ -1,5 +1,5 @@
-import app from './src/app.js';
-
+import { createApp } from './src/app.js';
+import { ConsoleEmailSender} from './src/email-verification/console.email-sender.js'
 try {
     process.loadEnvFile('.env');
 } catch (error) {
@@ -8,6 +8,10 @@ try {
     }
 }
 const port = process.env.PORT;
+
+const app = createApp({
+    emailSender: new ConsoleEmailSender(),
+})
 
 app.listen(port, () => {
     console.log(`App listening on port ${port}`);
