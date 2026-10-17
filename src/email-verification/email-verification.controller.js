@@ -1,26 +1,29 @@
 import { requestPinService } from "./email-verification.service.js";
 import Joi from 'joi'
+import { ConsoleEmailSender } from "./console.email-sender.js";
+
+const emailSender = new ConsoleEmailSender();
 
 const pinRequestSchema = Joi.object({
-    email: Joi.string().trim().email().required()
-}).required();
+    email: Joi.string().trim().email().lowercase().max(255).required()
+}).required();  // Contrato da API
 
 export async function requestPinController(req, res) {
 
     //const pin = await requestPinService();
     const response = pinRequestSchema.validate(req.body)
+
     if (response.error) {
-        res.status(400).json(response.error.message)
-        console.log(response.value)
-        return
+        return res.status(400).json({ "Erro": "Mande um e-mail certo" })
     }
-    const obj = await requestPinService();
-    res.status(201).json(obj)
-    /*
-    Logica para pegar o email, 
-    vai salvar no banco
-    e retornar 201 pro sistema
-    */
-    console.log(response)
-    
+
+    try {
+        const email = response.value.email
+        const result = await requestPinService(email, emailSender);
+        res.status(201).json(result);
+    } catch (error) {
+        console.error(error.message)
+        return res.status(500).json({ error: 'Não foi possível enviar o código' });
+    }
+
 }

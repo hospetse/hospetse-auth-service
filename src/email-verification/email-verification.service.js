@@ -1,29 +1,48 @@
-import crypto, { hash } from 'node:crypto';
-import { accessSync } from 'node:fs';
+import crypto from 'node:crypto';
+import { prisma } from "../lib/prisma.js";
 
-function generatePin(){
-        let PIN = "";
-        for (let i = 0; i < 6; i++){
-            PIN += crypto.randomInt(10);
-        }
-        return PIN;
+
+
+function generatePin() {
+    let PIN = "";
+    for (let i = 0; i < 6; i++) {
+        PIN += crypto.randomInt(10);
     }
+    return PIN;
+};
 
-function hashPin(pin){
+function hashPin(pin) {
     const secret = process.env.PIN_HMAC_SECRET;
     if (!secret) {
         throw new Error('PIN.HMAC_SECRET não configurada')
     }
-    return crypto.createHmac('sha256',secret).update(pin).digest('hex')
-}
-export async function requestPinService() {
-    const pin = generatePin();
-    const hash_pin = hashPin(pin);
-    const myPin = {
-        "PIN": pin,
-        "HASH_PIN": hash_pin
-    }
-    console.log(myPin)
-    return myPin;
-}
+    return crypto.createHmac('sha256', secret).update(pin).digest('hex')
+};
 
+export async function requestPinService(email, emailSender) {
+    const pin = generatePin();
+    const pinHash = hashPin(pin);
+    const expiresAt = new Date(Date.now() + 900_000);
+
+    const challenge = await prisma.$transaction(async (transacao_banco) => {
+        await transacao_banco.emailVerification.updateMany({
+            where: { email, consumedAt: null, invalidatedAt: null },
+            data: { invalidatedAt: new Date() },
+        });
+        const created = await transacao_banco.emailVerification.create({
+            data: { email, pinHash, expiresAt },
+        });
+
+        await emailSender.send({
+            to: email,
+            subject: "PIN",
+            text: pin
+        });
+
+        return created;
+
+    }, { timeout: 10000 });
+
+
+    return { challengeId: challenge.id };
+};
