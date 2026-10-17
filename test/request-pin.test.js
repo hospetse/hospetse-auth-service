@@ -137,7 +137,7 @@ test('request-pin: e-mail com user_auth ativa retorna 409 e não envia e-mail', 
     const email = `teste-auth-409-${Date.now()}@example.com`;
 
     await prisma.userAuth.create({
-        data: { email, passwordHash: 'hash-de-teste', status: 'active' }
+        data: { email, passwordHash: 'hash-de-teste', termsVersion: 'teste', status: 'active' }
     });
     const sentBefore = emailSender.sent.length;
 
@@ -157,7 +157,7 @@ test('request-pin: e-mail com user_auth pending_provisioning pode pedir PIN (ret
     const email = `teste-auth-pending-${Date.now()}@example.com`;
 
     await prisma.userAuth.create({
-        data: { email, passwordHash: 'hash-de-teste', status: 'pending_provisioning' }
+        data: { email, passwordHash: 'hash-de-teste', termsVersion: 'teste', status: 'pending_provisioning' }
     });
 
     const response = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
