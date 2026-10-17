@@ -4,12 +4,13 @@ Serviço de autenticação do Hospetse, separado do back-end principal e com ban
 
 Responsável por confirmar o e-mail com PIN no primeiro cadastro, criar a identidade, proteger a senha e emitir os tokens (JWT). O back-end principal nunca recebe nem armazena senha.
 
-Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01). Base do projeto e banco: Task #250 (HSP-PBI-078-TSK-02).
+Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01). Base do projeto e banco: Task #250 (HSP-PBI-078-TSK-02). Solicitação de PIN e envio de e-mail: Task #251 (HSP-PBI-078-TSK-03).
 
 ## Estado atual
 
-- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migration `init`), rota `GET /health` e teste automatizado do health.
-- Ainda não implementado: as rotas de autenticação descritas em [Rotas](#rotas). Elas são o contrato que as próximas Tasks implementam.
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migration `init`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail) e testes automatizados das duas rotas.
+- Ainda não implementado: `register`, `refresh` e a comunicação com o back-end, descritos em [Rotas](#rotas). Elas são o contrato que as próximas Tasks implementam.
+- O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
 ## Stack
 
@@ -25,7 +26,7 @@ Pré-requisito: acesso à `DATABASE_URL` do banco do Auth Server (instância pr�
 
 ```bash
 npm install
-cp .env.example .env          # preencher DATABASE_URL e PORT
+cp .env.example .env          # preencher DATABASE_URL, PORT e PIN_HMAC_SECRET
 npx prisma migrate deploy     # aplica as migrations no banco
 npx prisma generate           # gera o Prisma Client
 npm run dev
@@ -39,6 +40,13 @@ Conferir: `GET http://localhost:<PORT>/health` deve responder `200`.
 | --- | --- |
 | `DATABASE_URL` | URL de conexão do PostgreSQL do Auth Server |
 | `PORT` | Porta do servidor |
+| `PIN_HMAC_SECRET` | Chave secreta do HMAC-SHA256 usado no hash do PIN. Trocar a chave invalida os PINs abertos |
+
+Para gerar um `PIN_HMAC_SECRET`:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
 
 O `.env` não é versionado. Se ele não existir (deploy, CI), o `index.js` segue sem quebrar e usa as variáveis já definidas no ambiente; qualquer outro erro ao ler o arquivo interrompe a inicialização.
 
@@ -54,13 +62,21 @@ O `.env` não é versionado. Se ele não existir (deploy, CI), o `index.js` segu
 ### Estrutura
 
 ```text
-index.js                 carrega o .env e sobe o servidor
-src/app.js               app Express e rotas (exportado para os testes)
+index.js                 carrega o .env, escolhe as implementações e sobe o servidor
+src/app.js               createApp({ emailSender }): monta o app Express e as rotas
 src/lib/prisma.js        instância única do PrismaClient
+src/lib/app-error.js     AppError: erro de regra de negócio com status HTTP
+src/email-verification/
+  email-verification.controller.js   valida a entrada (Joi) e traduz o resultado em HTTP
+  email-verification.service.js      regras do request-pin: 409, 429, transação e envio
+  email-sender.interface.js          contrato EmailSender: send({ to, subject, text })
+  console.email-sender.js            implementação de dev (mostra o e-mail no terminal)
+  fake.email-sender.js               implementação de testes (guarda as mensagens)
 prisma/schema.prisma     modelos do banco
 prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
-test/app.test.js         testes de integração
+test/app.test.js         testes do /health
+test/request-pin.test.js testes do request-pin
 ```
 
 ### Banco e migrations
@@ -82,9 +98,29 @@ echo "SELECT 1;" | npx prisma db execute --stdin --schema prisma/schema.prisma
 | `200` | Servidor e banco respondendo |
 | `503` | Servidor de pé, banco indisponível (detalhe do erro só no log) |
 
+### Envio de e-mail
+
+O service não conhece o provedor de e-mail. Ele depende só do contrato `EmailSender` (`email-sender.interface.js`): um objeto com `send({ to, subject, text })` que devolve uma Promise e lança erro se o envio falhar. A classe base lança erro se a implementação não sobrescrever o `send`.
+
+| Implementação | Uso |
+| --- | --- |
+| `ConsoleEmailSender` | Desenvolvimento: mostra o e-mail (com o PIN) no terminal. Nunca usar em produção |
+| `FakeEmailSender` | Testes: guarda as mensagens em `sent`, para o teste ler o PIN |
+
+O sender é injetado de cima para baixo: `index.js` → `createApp({ emailSender })` → `createRequestPinController(emailSender)` → `requestPinService(email, emailSender)`. O `index.js` é o único lugar que escolhe a implementação (composition root). Para ligar um provedor real, basta criar uma classe que estende `EmailSender` e passá-la no `index.js`, sem mudar o service.
+
+### Erros
+
+Regras de negócio lançam `AppError(message, statusCode)` no service. O controller responde com o status do `AppError`; qualquer outro erro vira `500` genérico, e só a mensagem vai para o log.
+
 ### Testes
 
-`test/app.test.js` sobe o app numa porta aleatória (`app.listen(0)`), chama o `/health` e confere status e corpo. Como o health consulta o banco, o teste também prova a conexão (precisa do `.env` válido). O `after()` fecha o servidor e a conexão do Prisma ao final.
+Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSender` e precisam do `.env` válido, porque usam o banco.
+
+- `test/app.test.js`: chama o `/health` e confere status e corpo. Como o health consulta o banco, também prova a conexão.
+- `test/request-pin.test.js`: cobre `400`, `201` (com só o hash no banco), `429`, invalidação do PIN anterior, rollback com `500` quando o envio falha, `409` e a retentativa com `pending_provisioning`. O teste de rollback sobe um segundo app com um sender que sempre falha.
+
+O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails `teste-auth-*@example.com` e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma.
 
 ## Visão geral
 
@@ -142,9 +178,12 @@ Request:
 | `400` | E-mail inválido | erro padrão |
 | `409` | E-mail já cadastrado em `user_auth` com status `active` | erro padrão (front redireciona para o login) |
 | `429` | Pediu reenvio antes do intervalo mínimo | erro padrão |
+| `500` | Falha inesperada, inclusive no envio do e-mail | erro padrão |
 
 - E-mail com `user_auth` em `pending_provisioning` não é duplicado: pode pedir PIN novo (ver [Retentativa](#retentativa)).
 - Gerar um PIN novo invalida o anterior do mesmo e-mail (`invalidated_at`).
+- Invalidar os PINs abertos, criar o novo e enviar o e-mail acontecem na mesma transação, com o envio por último. Se o envio falhar, nada fica gravado.
+- Valores atuais: PIN de 6 dígitos, expiração de 15 min e intervalo de reenvio de 60 s (fixos no código por enquanto).
 - O `challengeId` não aparece na tela; o front guarda até o `register`.
 
 ### `POST /api/v1/auth/register`
@@ -303,13 +342,17 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **Banco:** instância PostgreSQL própria no Railway, separada da do back-end (isolamento do microserviço).
 - **ORM:** Prisma 6.19.0 com versão exata (sem `^`), gerador `prisma-client-js`, igual ao back-end. Atualizar para a 7 só junto com o back-end, numa Task própria.
 - **Hash da senha:** Argon2id, pacote `argon2` (Task #54).
+- **Hash do PIN:** HMAC-SHA256 com `PIN_HMAC_SECRET`. O PIN tem só 6 dígitos, então um hash sem chave seria quebrado testando as 1 milhão de combinações; com a chave, quem tiver só o banco não consegue.
+- **Envio de e-mail:** interface `EmailSender` injetada a partir do `index.js`, para trocar o provedor (ou usar um fake nos testes) sem mudar o caso de uso.
 - **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
 - **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio.
 
 ### Pendente (TBD)
 
-- Tamanho do PIN, tempo de expiração, limite de tentativas e intervalo de reenvio (serão variáveis de ambiente).
+- Limite de tentativas do PIN (usado no `register`).
+- Mover tamanho do PIN (6), expiração (15 min) e intervalo de reenvio (60 s) do código para variáveis de ambiente.
+- Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`.
 - Expiração do access token (~15 min, conforme #56) e do refresh token.
 - Se o refresh token é rotacionado (trocado por um novo) a cada renovação.
 - Onde fica o registro de aceite dos termos.
