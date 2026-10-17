@@ -1,8 +1,12 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert';
 import axios from 'axios';
-import app from '../src/app.js';
+import { createApp } from '../src/app.js';
 import { prisma } from '../src/lib/prisma.js';
+import { FakeEmailSender } from '../src/email-verification/fake.email-sender.js';
+
+const emailSender = new FakeEmailSender();
+const app = createApp({ emailSender });
 const server = app.listen(0);
 const { port } = server.address();
 
