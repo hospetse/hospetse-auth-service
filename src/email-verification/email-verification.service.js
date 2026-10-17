@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { prisma } from "../lib/prisma.js";
+import { AppError } from '../lib/app-error.js';
 
 
 
@@ -20,6 +21,16 @@ function hashPin(pin) {
 };
 
 export async function requestPinService(email, emailSender) {
+
+    const lastChallenge = await prisma.emailVerification.findFirst({
+        where: { email },
+        orderBy: { createdAt: 'desc' },
+    });
+
+    if (lastChallenge && Date.now() - lastChallenge.createdAt.getTime() < 60_000){
+        throw new AppError("Aguarde para solicitar um novo código", 429)
+    }
+
     const pin = generatePin();
     const pinHash = hashPin(pin);
     const expiresAt = new Date(Date.now() + 900_000);

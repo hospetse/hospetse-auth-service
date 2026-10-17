@@ -1,6 +1,7 @@
 import { requestPinService } from "./email-verification.service.js";
 import Joi from 'joi'
 import { ConsoleEmailSender } from "./console.email-sender.js";
+import { AppError } from "../lib/app-error.js";
 
 const emailSender = new ConsoleEmailSender();
 
@@ -22,7 +23,10 @@ export async function requestPinController(req, res) {
         const result = await requestPinService(email, emailSender);
         res.status(201).json(result);
     } catch (error) {
-        console.error(error.message)
+        if (error instanceof AppError){
+            return res.status(error.statusCode).json({error: error.message});
+        }
+        console.log(error.message)
         return res.status(500).json({ error: 'Não foi possível enviar o código' });
     }
 
