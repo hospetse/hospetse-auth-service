@@ -72,6 +72,9 @@ src/email-verification/
   email-sender.interface.js          contrato EmailSender: send({ to, subject, text })
   console.email-sender.js            implementação de dev (mostra o e-mail no terminal)
   fake.email-sender.js               implementação de testes (guarda as mensagens)
+src/user-auth/
+  user-auth.controller.js            valida o payload do register (Joi)
+  user-auth.service.js               regras do register: PIN, tentativas, hash da senha, transação
 prisma/schema.prisma     modelos do banco
 prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
@@ -197,23 +200,27 @@ Request:
   "challengeId": "uuid",
   "pin": "012345",
   "password": "...",
-  "passwordConfirmation": "...",
-  "acceptedTerms": true
+  "acceptedTerms": true,
+  "termsVersion": "2026-10-01"
 }
 ```
 
-O e-mail não vem no payload: ele vem da `email_verification`. O PIN é string (preserva zeros à esquerda).
+O e-mail não vem no payload: ele vem da `email_verification`. O PIN é string de 6 dígitos (preserva zeros à esquerda). `acceptedTerms` só aceita `true`. `termsVersion` identifica a versão dos termos aceita (até 64 caracteres). A confirmação de senha fica só no front.
 
 | Status | Caso | Body |
 | --- | --- | --- |
 | `201` | Conta criada e USER confirmado no back-end | access token + refresh token |
-| `400` | Payload inválido, senhas diferentes ou termos não aceitos | erro padrão |
+| `400` | Payload inválido ou termos não aceitos | erro padrão |
 | `401` | PIN errado (incrementa `attempts`) | erro padrão |
 | `404` | `challengeId` não existe | erro padrão |
 | `409` | E-mail já cadastrado com `user_auth` `active` (inclui corrida: `UNIQUE` / Prisma P2002) | erro padrão |
 | `410` | PIN expirado, invalidado ou consumido (exceto na retentativa) | erro padrão |
 | `429` | Limite de tentativas atingido | erro padrão |
 | `503` | Back-end não confirmou a criação do USER | erro padrão |
+
+Ordem das validações: challenge existe (`404`) → não consumido, invalidado nem expirado (`410`) → menos de 5 tentativas (`429`) → PIN confere (`401` e `attempts + 1`). Depois, numa transação: consome o challenge (update condicional) e cria a `user_auth`. Se o e-mail já tem `user_auth` em `pending_provisioning`, a linha é reaproveitada (mesmo `auth_user_id`) e recebe a senha e o aceite novos.
+
+**Etapa atual (#252):** o `register` ainda não chama o back-end nem emite tokens. Ele responde `201 { "authUserId": "uuid" }` e a `user_auth` fica em `pending_provisioning`. O back-end entra na #253 (junto com a exceção da retentativa para challenge já consumido) e os tokens na #254, quando a resposta passa a ser a da tabela acima.
 
 ### `POST /api/v1/auth/refresh`
 
@@ -311,10 +318,12 @@ Identidade autenticável, usada no cadastro e no login.
 | `provisioned_at` | TIMESTAMPTZ, nulo | Quando o back-end confirmou a criação do USER |
 | `created_at` | TIMESTAMPTZ | |
 | `updated_at` | TIMESTAMPTZ | |
+| `terms_accepted_at` | TIMESTAMPTZ, default `now()` | Quando os termos foram aceitos (hora do servidor, na criação da conta) |
+| `terms_version` | VARCHAR(64) | Versão dos termos aceita, enviada no `register` |
 
 O Auth Server não guarda referência ao USER: o back-end principal guarda o `auth_user_id` e localiza o USER pelo `sub` do JWT.
 
-O cadastro recebe só `challengeId`, PIN, senha, confirmação de senha e aceites; o e-mail vem da `email_verification`. Ao back-end principal são enviados apenas `auth_user_id` e e-mail confirmado.
+O cadastro recebe só `challengeId`, PIN, senha, aceite e versão dos termos; o e-mail vem da `email_verification`. Ao back-end principal são enviados apenas `auth_user_id` e e-mail confirmado.
 
 ### `refresh_token`
 
@@ -343,6 +352,9 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **ORM:** Prisma 6.19.0 com versão exata (sem `^`), gerador `prisma-client-js`, igual ao back-end. Atualizar para a 7 só junto com o back-end, numa Task própria.
 - **Hash da senha:** Argon2id, pacote `argon2` (Task #54).
 - **Hash do PIN:** HMAC-SHA256 com `PIN_HMAC_SECRET`. O PIN tem só 6 dígitos, então um hash sem chave seria quebrado testando as 1 milhão de combinações; com a chave, quem tiver só o banco não consegue.
+- **Limite de tentativas do PIN:** 5. Na 6ª, o `register` responde `429` antes de comparar o PIN.
+- **Aceite dos termos:** o payload traz `acceptedTerms: true` e `termsVersion`; o servidor grava a versão e a hora (`now()`) na mesma transação que cria a `user_auth`. Não existe conta sem aceite nem aceite sem conta.
+- **Confirmação de senha:** só no front. Ela evita erro de digitação, mas não traz segurança na API.
 - **Envio de e-mail:** interface `EmailSender` injetada a partir do `index.js`, para trocar o provedor (ou usar um fake nos testes) sem mudar o caso de uso.
 - **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
@@ -350,14 +362,14 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 
 ### Pendente (TBD)
 
-- Limite de tentativas do PIN (usado no `register`).
+- Regras da senha: tamanho mínimo, máximo e composição (decisão da PO na #252). Por enquanto a API só exige a senha.
 - Mover tamanho do PIN (6), expiração (15 min) e intervalo de reenvio (60 s) do código para variáveis de ambiente.
 - Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`.
 - Expiração do access token (~15 min, conforme #56) e do refresh token.
 - Se o refresh token é rotacionado (trocado por um novo) a cada renovação.
-- Onde fica o registro de aceite dos termos.
 - Se a checagem de e-mail duplicado fica no `request-pin` (como acima) ou numa rota separada. Em ambos os casos, precisa de rate limit.
-- Se `passwordConfirmation` vai para a API ou fica só no front.
+- Confirmação da PO de que a `passwordConfirmation` fica só no front (recomendação técnica registrada na #252).
+- Se o `termsVersion` aceito precisa ser a versão vigente (ex.: env `TERMS_VERSION`) ou qualquer versão.
 - Formato exato do erro padrão (#56) e lista de códigos de erro.
 - Claims do JWT de usuário (`sub`, `iss`, `aud`, `iat`, `exp`).
 - Timeout por tentativa e número de retentativas do Auth na chamada da rota interna (manter baixo: o usuário espera a resposta).
