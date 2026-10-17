@@ -30,14 +30,16 @@ model EmailVerification {
 }
 
 model UserAuth {
-  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  email         String         @unique @db.VarChar(255)
-  passwordHash  String         @map("password_hash") @db.VarChar(255)
-  status        UserAuthStatus @default(pending_provisioning)
-  provisionedAt DateTime?      @map("provisioned_at") @db.Timestamptz(3)
-  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
-  refreshTokens RefreshToken[]
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email           String         @unique @db.VarChar(255)
+  passwordHash    String         @map("password_hash") @db.VarChar(255)
+  status          UserAuthStatus @default(pending_provisioning)
+  provisionedAt   DateTime?      @map("provisioned_at") @db.Timestamptz(3)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  termsAcceptedAt DateTime       @default(now()) @map("terms_accepted_at") @db.Timestamptz(3)
+  termsVersion    String         @map("terms_version") @db.VarChar(64)
+  refreshTokens   RefreshToken[]
 
   @@map("user_auth")
 }
