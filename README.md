@@ -8,8 +8,8 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 
 ## Estado atual
 
-- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migration `init`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail) e testes automatizados das duas rotas.
-- Ainda não implementado: `register`, `refresh` e a comunicação com o back-end, descritos em [Rotas](#rotas). Elas são o contrato que as próximas Tasks implementam.
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` em `pending_provisioning`) e testes automatizados das três rotas.
+- Ainda não implementado: a comunicação do `register` com o back-end, os tokens e o `refresh`, descritos em [Rotas](#rotas). Eles são o contrato que as próximas Tasks implementam.
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
 ## Stack
@@ -80,6 +80,7 @@ prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
+test/register.test.js    testes do register
 ```
 
 ### Banco e migrations
@@ -122,8 +123,9 @@ Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSe
 
 - `test/app.test.js`: chama o `/health` e confere status e corpo. Como o health consulta o banco, também prova a conexão.
 - `test/request-pin.test.js`: cobre `400`, `201` (com só o hash no banco), `429`, invalidação do PIN anterior, rollback com `500` quando o envio falha, `409` e a retentativa com `pending_provisioning`. O teste de rollback sobe um segundo app com um sender que sempre falha.
+- `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `pending` e só o hash Argon2id no banco, `409` com rollback do consumo do PIN e a retentativa reaproveitando o mesmo `authUserId`. O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
 
-O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails `teste-auth-*@example.com` e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma.
+O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin e `teste-register-*@example.com` no register) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
 
 ## Visão geral
 
