@@ -14,7 +14,7 @@ function isSamePinHash(pinHash, storedPinHash) {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
 
-export async function registerService({ challengeId, pin, password, termsVersion }) {
+export async function registerService({ challengeId, pin, password, name, termsVersion }, userProvisioner) {
 
     // ver se challenge existe
     const challenge = await prisma.emailVerification.findUnique({
@@ -23,8 +23,18 @@ export async function registerService({ challengeId, pin, password, termsVersion
     if (!challenge) { throw new AppError("Código de verificação não encontrado", 404) }
 
     // ver o pin ainda pode ser usado
-    if (challenge.consumedAt || challenge.invalidatedAt || challenge.expiresAt < new Date()) {
+    if (challenge.invalidatedAt || challenge.expiresAt < new Date()) {
         throw new AppError("Código expirado ou já utilizado", 410)
+    }
+
+    // challenge já consumido só vale como retentativa: o cadastro anterior parou porque o back-end falhou
+    // (user_auth ainda pending). Se a conta já está active, ou não existe, o PIN não pode ser reusado
+    const isRetry = Boolean(challenge.consumedAt);
+    if (isRetry) {
+        const userAuthPending = await prisma.userAuth.findUnique({
+            where: { email: challenge.email, status: 'pending_provisioning' }
+        });
+        if (!userAuthPending) { throw new AppError("Código expirado ou já utilizado", 410) }
     }
 
     // ver se nao estourou as tentativas
@@ -47,12 +57,15 @@ export async function registerService({ challengeId, pin, password, termsVersion
 
     try {
         const userAuth = await prisma.$transaction(async (transacao_banco) => {
-            // consome só se ainda estiver aberto: se outra requisição consumiu antes, count é 0
-            const consumed = await transacao_banco.emailVerification.updateMany({
-                where: { id: challengeId, consumedAt: null, invalidatedAt: null, expiresAt: { gt: new Date() } },
-                data: { consumedAt: new Date() }
-            });
-            if (consumed.count === 0) { throw new AppError("Código expirado ou já utilizado", 410) }
+            // consome só se ainda estiver aberto: se outra requisição consumiu antes, count é 0.
+            // Na retentativa ele já foi consumido na primeira vez, então não consome de novo
+            if (!isRetry) {
+                const consumed = await transacao_banco.emailVerification.updateMany({
+                    where: { id: challengeId, consumedAt: null, invalidatedAt: null, expiresAt: { gt: new Date() } },
+                    data: { consumedAt: new Date() }
+                });
+                if (consumed.count === 0) { throw new AppError("Código expirado ou já utilizado", 410) }
+            }
 
             const existing = await transacao_banco.userAuth.findUnique({
                 where: { email }
@@ -75,13 +88,22 @@ export async function registerService({ challengeId, pin, password, termsVersion
                 //   email:           do challenge
                 //   passwordHash:    "$argon2id$..."
                 //   status:          "pending_provisioning" (default)
-                //   provisionedAt:   null (preenchido na #253, quando o back-end confirmar)
+                //   provisionedAt:   null (preenchido logo abaixo, quando o back-end confirmar)
                 //   createdAt:       now() (default)
                 //   updatedAt:       now() (@updatedAt, muda a cada update)
                 //   termsAcceptedAt: now() (default, hora do servidor)
                 //   termsVersion:    do payload
                 // }
             });
+        });
+
+        // cria o USER no back-end. Se falhar, lança (409 ou 503) e a user_auth fica pending para a retentativa
+        await userProvisioner.provision({ authUserId: userAuth.id, email, name });
+
+        // só com a confirmação do back-end a conta fica ativa
+        await prisma.userAuth.update({
+            where: { id: userAuth.id },
+            data: { status: 'active', provisionedAt: new Date() }
         });
 
         return { authUserId: userAuth.id };
