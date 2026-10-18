@@ -3,7 +3,7 @@ import { prisma } from "./lib/prisma.js";
 import express from "express";
 import { createRegisterController } from "./user-auth/user-auth.controller.js";
 
-export function createApp({ emailSender }) {
+export function createApp({ emailSender, userProvisioner }) {
     const app = express();
 
     app.use(express.json());
@@ -27,7 +27,7 @@ export function createApp({ emailSender }) {
     });
 
     app.post('/api/v1/auth/request-pin', createRequestPinController(emailSender));
-    app.post('/api/v1/auth/register', createRegisterController());
+    app.post('/api/v1/auth/register', createRegisterController(userProvisioner));
     return app
 }
 

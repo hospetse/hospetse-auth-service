@@ -8,8 +8,9 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 
 ## Estado atual
 
-- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` em `pending_provisioning`) e testes automatizados das três rotas.
-- Ainda não implementado: a comunicação do `register` com o back-end, os tokens e o `refresh`, descritos em [Rotas](#rotas). Eles são o contrato que as próximas Tasks implementam.
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry) e testes automatizados das três rotas.
+- Ainda não implementado: os tokens, o `refresh` e o token de serviço da rota interna, descritos em [Rotas](#rotas). Eles são o contrato que as próximas Tasks implementam.
+- A rota interna `PUT /api/v1/internal/users/{authUserId}` ainda não existe no back-end. Em desenvolvimento, sem ela o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
 ## Stack
@@ -41,6 +42,7 @@ Conferir: `GET http://localhost:<PORT>/health` deve responder `200`.
 | `DATABASE_URL` | URL de conexão do PostgreSQL do Auth Server |
 | `PORT` | Porta do servidor |
 | `PIN_HMAC_SECRET` | Chave secreta do HMAC-SHA256 usado no hash do PIN. Trocar a chave invalida os PINs abertos |
+| `BACKEND_URL` | URL base do back-end principal, usada na rota interna de criação do USER (ex.: `http://localhost:3000`) |
 
 Para gerar um `PIN_HMAC_SECRET`:
 
@@ -63,7 +65,7 @@ O `.env` não é versionado. Se ele não existir (deploy, CI), o `index.js` segu
 
 ```text
 index.js                 carrega o .env, escolhe as implementações e sobe o servidor
-src/app.js               createApp({ emailSender }): monta o app Express e as rotas
+src/app.js               createApp({ emailSender, userProvisioner }): monta o app Express e as rotas
 src/lib/prisma.js        instância única do PrismaClient
 src/lib/app-error.js     AppError: erro de regra de negócio com status HTTP
 src/email-verification/
@@ -74,13 +76,18 @@ src/email-verification/
   fake.email-sender.js               implementação de testes (guarda as mensagens)
 src/user-auth/
   user-auth.controller.js            valida o payload do register (Joi)
-  user-auth.service.js               regras do register: PIN, tentativas, hash da senha, transação
+  user-auth.service.js               regras do register: PIN, tentativas, hash da senha, transação, provisionamento
+src/user-provisioning/
+  user-provisioner.interface.js      contrato UserProvisioner: provision({ authUserId, email, name })
+  http.user-provisioner.js           implementação real (PUT na rota interna, timeout e retry)
+  fake.user-provisioner.js           implementação de testes (guarda as chamadas, pode simular falha)
 prisma/schema.prisma     modelos do banco
 prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
+test/http.user-provisioner.test.js  testes do HttpUserProvisioner contra um back-end fake
 ```
 
 ### Banco e migrations
@@ -113,17 +120,40 @@ O service não conhece o provedor de e-mail. Ele depende só do contrato `EmailS
 
 O sender é injetado de cima para baixo: `index.js` → `createApp({ emailSender })` → `createRequestPinController(emailSender)` → `requestPinService(email, emailSender)`. O `index.js` é o único lugar que escolhe a implementação (composition root). Para ligar um provedor real, basta criar uma classe que estende `EmailSender` e passá-la no `index.js`, sem mudar o service.
 
+### Provisionamento no back-end
+
+Depois de criar a `user_auth`, o `register` pede ao back-end principal para criar o USER e o TUTOR. O service depende só do contrato `UserProvisioner` (`user-provisioner.interface.js`): `provision({ authUserId, email, name })` resolve quando o back-end confirmou e lança `AppError` quando não.
+
+| Implementação | Uso |
+| --- | --- |
+| `HttpUserProvisioner` | Faz o `PUT /api/v1/internal/users/{authUserId}` em `BACKEND_URL`, com timeout de 3 s e até 3 tentativas |
+| `FakeUserProvisioner` | Testes: guarda as chamadas em `provisioned`; se `error` estiver definido, lança esse erro |
+
+O `HttpUserProvisioner` traduz a resposta do back-end:
+
+| Back-end | `provision` faz |
+| --- | --- |
+| `201` ou `200` | Resolve (USER criado agora ou já existia) |
+| `409` | Lança `AppError` `409` na hora |
+| `401` e outros `4xx` | Lança `AppError` `503` na hora (repetir daria o mesmo erro) |
+| `5xx`, timeout ou back-end fora | Repete com espera de 200 ms e 400 ms; se as 3 falharem, lança `AppError` `503` |
+
+O log da falha registra o `authUserId` e o status (ou o código do erro, como `ECONNABORTED`), nunca o e-mail ou o nome. O retry fica no adapter porque só ele sabe quais falhas de HTTP são passageiras; para o service, `provision` é uma chamada só.
+
+A injeção segue o mesmo caminho do e-mail: `index.js` → `createApp({ userProvisioner })` → `createRegisterController(userProvisioner)` → `registerService(dados, userProvisioner)`.
+
 ### Erros
 
 Regras de negócio lançam `AppError(message, statusCode)` no service. O controller responde com o status do `AppError`; qualquer outro erro vira `500` genérico, e só a mensagem vai para o log.
 
 ### Testes
 
-Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSender` e precisam do `.env` válido, porque usam o banco.
+Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSender` e o `FakeUserProvisioner` e precisam do `.env` válido, porque usam o banco.
 
 - `test/app.test.js`: chama o `/health` e confere status e corpo. Como o health consulta o banco, também prova a conexão.
 - `test/request-pin.test.js`: cobre `400`, `201` (com só o hash no banco), `429`, invalidação do PIN anterior, rollback com `500` quando o envio falha, `409` e a retentativa com `pending_provisioning`. O teste de rollback sobe um segundo app com um sender que sempre falha.
-- `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `pending` e só o hash Argon2id no banco, `409` com rollback do consumo do PIN e a retentativa reaproveitando o mesmo `authUserId`. O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
+- `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `active`, `provisioned_at` preenchido, só o hash Argon2id no banco e o back-end recebendo exatamente `authUserId`, e-mail e nome, `409` com rollback do consumo do PIN, `409` do back-end mantendo a conta `pending`, e as duas retentativas depois de `503` (com PIN novo e com o mesmo challenge), reaproveitando o mesmo `authUserId`. O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
+- `test/http.user-provisioner.test.js`: sobe um Express fake no lugar do back-end e cobre `201`, `200`, `409` e `401` sem repetir, `500` e timeout repetindo 3 vezes, falha passageira resolvida pelo retry e back-end fora do ar. Usa timeout e espera curtos no construtor para não demorar.
 
 O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin e `teste-register-*@example.com` no register) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
 
@@ -138,15 +168,15 @@ Front-end ──(rotas públicas)──> Auth Server ──(rota interna)──>
 - **Auth Server:** e-mail, senha (hash), PIN e refresh tokens. Assina os JWT com a chave privada (RS256).
 - **Back-end principal:** USER, TUTOR e o resto do domínio. Valida os JWT com a chave pública e identifica o USER pelo `sub` (`auth_user_id`).
 - O JWT só é emitido depois que o back-end confirma a criação do USER.
-- O Auth Server não guarda dados de perfil. O nome e o celular são informados depois, na conclusão do perfil do Tutor, direto no back-end.
+- O Auth Server não guarda dados de perfil. O nome vem no `register` e é só repassado ao back-end, que cria o TUTOR com ele. O celular e o resto do perfil são informados depois, direto no back-end.
 
 ### Fluxo de cadastro
 
 1. **Tela de e-mail + senha:** o front chama `request-pin` e guarda a senha em memória. O usuário recebe o PIN por e-mail.
-2. **Tela de PIN:** o front chama `register` com `challengeId`, PIN e a senha guardada. Se o PIN estiver errado, o erro aparece nesta tela.
-3. O Auth Server consome o PIN, cria a `user_auth` (`pending_provisioning`) e chama a rota interna do back-end, que cria o USER (`account_type = tutor`).
+2. **Tela de PIN:** o front chama `register` com `challengeId`, PIN, nome e a senha guardada. Se o PIN estiver errado, o erro aparece nesta tela.
+3. O Auth Server consome o PIN, cria a `user_auth` (`pending_provisioning`) e chama a rota interna do back-end, que cria o USER (`account_type = tutor`) e o TUTOR com o nome.
 4. Com a confirmação do back-end, o Auth marca a `user_auth` como `active` e devolve access token + refresh token.
-5. **Tela logada:** a conclusão do perfil (nome, celular) é obrigatória para usar o app e fica no back-end (outra PBI). Até lá, o usuário é um USER sem TUTOR ("perfil incompleto").
+5. **Tela logada:** a conclusão do perfil (celular e demais dados) fica no back-end (outra PBI).
 
 ## Rotas
 
@@ -174,7 +204,7 @@ Gera um PIN, envia por e-mail e cria uma `email_verification`.
 Request:
 
 ```json
-{ "email": "tutor@exemplo.com" }
+{ "email": "tutor@exemplo.com", "name": "Maria Silva" }
 ```
 
 | Status | Caso | Body |
@@ -200,6 +230,7 @@ Request:
 ```json
 {
   "challengeId": "uuid",
+  "name": "Maria Silva",
   "pin": "012345",
   "password": "...",
   "acceptedTerms": true,
@@ -207,7 +238,7 @@ Request:
 }
 ```
 
-O e-mail não vem no payload: ele vem da `email_verification`. O PIN é string de 6 dígitos (preserva zeros à esquerda). `acceptedTerms` só aceita `true`. `termsVersion` identifica a versão dos termos aceita (até 64 caracteres). A confirmação de senha fica só no front.
+O e-mail não vem no payload: ele vem da `email_verification`. `name` tem até 255 caracteres (igual a `tutors.name` no back-end) e não é gravado no Auth, só repassado. O PIN é string de 6 dígitos (preserva zeros à esquerda). `acceptedTerms` só aceita `true`. `termsVersion` identifica a versão dos termos aceita (até 64 caracteres). A confirmação de senha fica só no front.
 
 | Status | Caso | Body |
 | --- | --- | --- |
@@ -222,7 +253,7 @@ O e-mail não vem no payload: ele vem da `email_verification`. O PIN é string d
 
 Ordem das validações: challenge existe (`404`) → não consumido, invalidado nem expirado (`410`) → menos de 5 tentativas (`429`) → PIN confere (`401` e `attempts + 1`). Depois, numa transação: consome o challenge (update condicional) e cria a `user_auth`. Se o e-mail já tem `user_auth` em `pending_provisioning`, a linha é reaproveitada (mesmo `auth_user_id`) e recebe a senha e o aceite novos.
 
-**Etapa atual (#252):** o `register` ainda não chama o back-end nem emite tokens. Ele responde `201 { "authUserId": "uuid" }` e a `user_auth` fica em `pending_provisioning`. O back-end entra na #253 (junto com a exceção da retentativa para challenge já consumido) e os tokens na #254, quando a resposta passa a ser a da tabela acima.
+**Etapa atual (#253):** o `register` já cria o USER no back-end e marca a `user_auth` como `active`, mas ainda não emite tokens. Com sucesso, responde `201 { "authUserId": "uuid" }`. Os tokens entram na #254, quando a resposta passa a ser a da tabela acima.
 
 ### `POST /api/v1/auth/refresh`
 
@@ -243,19 +274,19 @@ Fica para outra PBI. Sucesso: `200` + tokens. Credencial inválida: `401`.
 
 Chamada só pelo Auth Server, depois de criar a `user_auth`. Não é usada pelo front.
 
-`PUT` porque é idempotente: chamar de novo após um timeout não cria um segundo USER. O `authUserId` vai no caminho porque é o Auth que define o id.
+`PUT` porque é idempotente: chamar de novo após um timeout não cria um segundo USER. O `authUserId` vai no caminho porque é o Auth que gera esse identificador. O back-end guarda ele na coluna `users.auth_user_id` (UNIQUE), separada do `users.id`, que continua gerado pelo back-end. O UNIQUE é o que garante que a retentativa não duplica o USER.
 
 Request:
 
 ```json
-{ "email": "tutor@exemplo.com" }
+{ "email": "tutor@exemplo.com", "name": "Maria Silva" }
 ```
 
 Autenticação: token de serviço (JWT curto assinado pelo Auth com a chave privada RS256, `aud: "hospetse-backend-internal"`). O back-end valida com a chave pública que já tem. A claim `aud` impede o uso de um token de usuário nesta rota.
 
 | Status | Caso |
 | --- | --- |
-| `201` | USER criado agora (`account_type = tutor`) |
+| `201` | USER (`account_type = tutor`) e TUTOR (com o `name`) criados agora |
 | `200` | USER já existia para esse `authUserId` (retentativa) |
 | `401` | Token de serviço ausente ou inválido |
 | `409` | E-mail já usado por outro USER |
@@ -266,7 +297,7 @@ O PIN é consumido e a `user_auth` é criada (`pending_provisioning`) antes da c
 
 | Resposta do back-end | Auth Server faz | Front recebe |
 | --- | --- | --- |
-| `201` ou `200` | Marca `active`, preenche `provisioned_at`, emite tokens | `201` + tokens |
+| `201` ou `200` | Marca `active`, preenche `provisioned_at`, emite tokens (#254) | `201` + tokens |
 | `409` | Mantém `pending_provisioning` e registra o erro | `409` |
 | `401` | Erro de configuração; registra o erro | `503` |
 | Timeout ou `5xx` | Retenta dentro da requisição; se todas falharem, mantém `pending_provisioning` | `503` |
@@ -275,10 +306,10 @@ O PIN é consumido e a `user_auth` é criada (`pending_provisioning`) antes da c
 
 Duas camadas:
 
-1. **Auth retenta dentro da requisição:** poucas tentativas do `PUT`, com espera curta entre elas, antes de devolver `503`. Seguro porque o `PUT` é idempotente. Cobre falhas rápidas (deploy, oscilação de rede).
+1. **Auth retenta dentro da requisição:** até 3 tentativas do `PUT` (timeout de 3 s cada, espera de 200 ms e 400 ms), antes de devolver `503`. Seguro porque o `PUT` é idempotente. Cobre falhas rápidas (deploy, oscilação de rede).
 2. **Front oferece "tentar de novo":** se ainda vier `503`, o front reenvia o `register` com o mesmo `challengeId`, PIN e senha.
 
-Regra do `register` para a retentativa: se a `user_auth` do e-mail está em `pending_provisioning`, o `register` aceita o mesmo `challengeId` + PIN de novo, desde que o PIN não tenha expirado. Nesse caso:
+Regra do `register` para a retentativa: se a `user_auth` do e-mail está em `pending_provisioning`, o `register` aceita o mesmo `challengeId` + PIN de novo, desde que o PIN não tenha expirado nem sido invalidado. O limite de tentativas e a comparação do PIN continuam valendo. Se a conta já está `active`, o challenge consumido responde `410`. Nesse caso:
 
 - não cria outra `user_auth`: reaproveita a linha existente (mesmo `auth_user_id`, mantém o vínculo caso o back-end já tenha criado o USER);
 - atualiza a senha com a enviada;
@@ -323,9 +354,9 @@ Identidade autenticável, usada no cadastro e no login.
 | `terms_accepted_at` | TIMESTAMPTZ, default `now()` | Quando os termos foram aceitos (hora do servidor, na criação da conta) |
 | `terms_version` | VARCHAR(64) | Versão dos termos aceita, enviada no `register` |
 
-O Auth Server não guarda referência ao USER: o back-end principal guarda o `auth_user_id` e localiza o USER pelo `sub` do JWT.
+O Auth Server não guarda referência ao USER: o back-end principal guarda o `auth_user_id` numa coluna própria (`users.auth_user_id`, UNIQUE) e localiza o USER pelo `sub` do JWT. O `users.id` é do back-end e não sai dele, então as FKs internas não dependem do Auth.
 
-O cadastro recebe só `challengeId`, PIN, senha, aceite e versão dos termos; o e-mail vem da `email_verification`. Ao back-end principal são enviados apenas `auth_user_id` e e-mail confirmado.
+O cadastro recebe só `challengeId`, nome, PIN, senha, aceite e versão dos termos; o e-mail vem da `email_verification`. Ao back-end principal são enviados apenas `auth_user_id`, e-mail confirmado e nome (nunca a senha).
 
 ### `refresh_token`
 
@@ -360,7 +391,10 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **Envio de e-mail:** interface `EmailSender` injetada a partir do `index.js`, para trocar o provedor (ou usar um fake nos testes) sem mudar o caso de uso.
 - **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
-- **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio.
+- **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio. A chamada fica fora da transação do `register`, para a `user_auth` `pending` sobreviver à falha e permitir a retentativa com o mesmo `authUserId`.
+- **Vínculo USER ↔ identidade:** o back-end guarda o `authUserId` em `users.auth_user_id` (UNIQUE), separado do `users.id`.
+- **Nome no cadastro:** o `register` recebe o `name` e só repassa ao back-end, que cria o TUTOR com ele. O Auth não guarda o nome.
+- **Cliente HTTP:** axios, o mesmo dos testes. Fica em `dependencies`, porque o `HttpUserProvisioner` usa em produção.
 
 ### Pendente (TBD)
 
@@ -374,5 +408,7 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - Se o `termsVersion` aceito precisa ser a versão vigente (ex.: env `TERMS_VERSION`) ou qualquer versão.
 - Formato exato do erro padrão (#56) e lista de códigos de erro.
 - Claims do JWT de usuário (`sub`, `iss`, `aud`, `iat`, `exp`).
-- Timeout por tentativa e número de retentativas do Auth na chamada da rota interna (manter baixo: o usuário espera a resposta).
+- Token de serviço da rota interna: o `HttpUserProvisioner` ainda não envia autenticação. Depende das chaves RS256 (#254) ou de um segredo provisório.
+- Rota interna no back-end (`PUT /api/v1/internal/users/{authUserId}`), com `users.auth_user_id` UNIQUE, criação do TUTOR com o nome e `users.password` deixando de ser obrigatório.
+- Mover o timeout (3 s) e as tentativas (3) do `HttpUserProvisioner` para variáveis de ambiente, se precisar ajustar por ambiente.
 - User agent / dados do dispositivo na sessão (depois).
