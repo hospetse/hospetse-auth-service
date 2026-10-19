@@ -3,6 +3,7 @@ import argon2 from 'argon2';
 import { prisma } from "../lib/prisma.js";
 import { AppError } from '../lib/app-error.js';
 import { hashPin } from '../email-verification/email-verification.service.js';
+import { signAccessToken, ACCESS_TOKEN_TTL_SECONDS } from '../lib/jwt.js';
 
 const MAX_PIN_ATTEMPTS = 5;
 
@@ -106,7 +107,14 @@ export async function registerService({ challengeId, pin, password, name, termsV
             data: { status: 'active', provisionedAt: new Date() }
         });
 
-        return { authUserId: userAuth.id };
+        // conta ativa e USER confirmado no back-end: só agora emite o token (ADR-011)
+        const accessToken = await signAccessToken(userAuth.id);
+
+        return {
+            accessToken,
+            tokenType: 'Bearer',
+            expiresIn: ACCESS_TOKEN_TTL_SECONDS
+        };
     } catch (error) {
         // corrida: outra requisição criou a user_auth do mesmo e-mail entre o findUnique e o create
         if (error.code === 'P2002') {

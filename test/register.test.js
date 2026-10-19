@@ -7,6 +7,7 @@ import { prisma } from '../src/lib/prisma.js';
 import { FakeEmailSender } from '../src/email-verification/fake.email-sender.js';
 import { FakeUserProvisioner } from '../src/user-provisioning/fake.user-provisioner.js';
 import { AppError } from '../src/lib/app-error.js';
+import { verifyAccessToken } from '../src/lib/jwt.js';
 
 const emailSender = new FakeEmailSender();
 const userProvisioner = new FakeUserProvisioner();
@@ -67,10 +68,13 @@ test('register: PIN e payload válidos criam o USER no back-end, ativam a user_a
     );
 
     assert.strictEqual(response.status, 201);
-    assert.ok(response.data.authUserId);
+    assert.ok(response.data.accessToken);
+
+    // o token precisa ser válido (assinatura, exp, iss, aud) e ter no sub a user_auth criada
+    const { sub } = await verifyAccessToken(response.data.accessToken);
 
     const userAuth = await prisma.userAuth.findUnique({ where: { email } });
-    assert.strictEqual(userAuth.id, response.data.authUserId);
+    assert.strictEqual(userAuth.id, sub);
     assert.strictEqual(userAuth.status, 'active');
     assert.ok(userAuth.provisionedAt);
     assert.strictEqual(userAuth.termsVersion, 'v1');
@@ -306,7 +310,8 @@ test('register: retentativa depois de falha no back-end reaproveita o mesmo auth
     );
 
     assert.strictEqual(secondRegister.status, 201);
-    assert.strictEqual(secondRegister.data.authUserId, pending.id);
+    const { sub } = await verifyAccessToken(secondRegister.data.accessToken);
+    assert.strictEqual(sub, pending.id);
 
     const userAuths = await prisma.userAuth.count({ where: { email } });
     assert.strictEqual(userAuths, 1);
@@ -344,7 +349,8 @@ test('register: retentativa com o mesmo challenge depois de falha no back-end re
     assert.strictEqual(userAuths, 1);
 
     const userAuth = await prisma.userAuth.findUnique({ where: { email } });
-    assert.strictEqual(userAuth.id, second.data.authUserId);
+    const { sub } = await verifyAccessToken(second.data.accessToken);
+    assert.strictEqual(userAuth.id, sub);
     assert.strictEqual(userAuth.status, 'active');
 });
 

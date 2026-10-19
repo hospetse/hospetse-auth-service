@@ -4,19 +4,20 @@ Serviço de autenticação do Hospetse, separado do back-end principal e com ban
 
 Responsável por confirmar o e-mail com PIN no primeiro cadastro, criar a identidade, proteger a senha e emitir os tokens (JWT). O back-end principal nunca recebe nem armazena senha.
 
-Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01). Base do projeto e banco: Task #250 (HSP-PBI-078-TSK-02). Solicitação de PIN e envio de e-mail: Task #251 (HSP-PBI-078-TSK-03).
+Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-078-TSK-01). Base do projeto e banco: Task #250 (HSP-PBI-078-TSK-02). Solicitação de PIN e envio de e-mail: Task #251 (HSP-PBI-078-TSK-03). Emissão e validação do JWT: Task #254 (HSP-PBI-078-TSK-06).
 
 ## Estado atual
 
-- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry) e testes automatizados das três rotas.
-- Ainda não implementado: os tokens, o `refresh` e o token de serviço da rota interna, descritos em [Rotas](#rotas). Eles são o contrato que as próximas Tasks implementam.
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry, e emite o access token JWT RS256) e testes automatizados das três rotas.
+- Ainda não implementado: o refresh token e a rota `refresh` (#256) e o token de serviço da rota interna, descritos em [Rotas](#rotas). Eles são o contrato que as próximas Tasks implementam.
 - A rota interna `PUT /api/v1/internal/users/{authUserId}` ainda não existe no back-end. Em desenvolvimento, sem ela o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
 ## Stack
 
-- Node.js 20.12+ (usa `process.loadEnvFile`), ES Modules
+- Node.js 22.9+ (usa a flag `--env-file-if-exists`), ES Modules
 - Express 5
+- `jose` para assinar e validar o JWT
 - Prisma 6.19.0 (versão fixa, igual ao back-end) + PostgreSQL
 - Testes: `node:test` + axios
 - Lint: ESLint (mesma configuração do back-end)
@@ -27,7 +28,7 @@ Pré-requisito: acesso à `DATABASE_URL` do banco do Auth Server (instância pr�
 
 ```bash
 npm install
-cp .env.example .env          # preencher DATABASE_URL, PORT e PIN_HMAC_SECRET
+cp .env.example .env          # preencher DATABASE_URL, PORT, PIN_HMAC_SECRET, BACKEND_URL e as chaves JWT
 npx prisma migrate deploy     # aplica as migrations no banco
 npx prisma generate           # gera o Prisma Client
 npm run dev
@@ -43,6 +44,8 @@ Conferir: `GET http://localhost:<PORT>/health` deve responder `200`.
 | `PORT` | Porta do servidor |
 | `PIN_HMAC_SECRET` | Chave secreta do HMAC-SHA256 usado no hash do PIN. Trocar a chave invalida os PINs abertos |
 | `BACKEND_URL` | URL base do back-end principal, usada na rota interna de criação do USER (ex.: `http://localhost:3000`) |
+| `JWT_PRIVATE_KEY` | Chave privada RSA (PEM, PKCS#8) que assina os JWT. Existe só no Auth Server |
+| `JWT_PUBLIC_KEY` | Chave pública RSA (PEM, SPKI) do mesmo par. É a única que vai para o back-end principal |
 
 Para gerar um `PIN_HMAC_SECRET`:
 
@@ -50,24 +53,39 @@ Para gerar um `PIN_HMAC_SECRET`:
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-O `.env` não é versionado. Se ele não existir (deploy, CI), o `index.js` segue sem quebrar e usa as variáveis já definidas no ambiente; qualquer outro erro ao ler o arquivo interrompe a inicialização.
+Para gerar o par de chaves do JWT (RSA 2048):
+
+```bash
+mkdir -p keys
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out keys/private.pem   # privada
+openssl pkey -in keys/private.pem -pubout -out keys/public.pem                        # pública, derivada da privada
+chmod 600 keys/private.pem
+printf '\nJWT_PRIVATE_KEY="%s"\nJWT_PUBLIC_KEY="%s"\n' "$(cat keys/private.pem)" "$(cat keys/public.pem)" >> .env
+```
+
+O PEM tem várias linhas: no `.env` ele fica entre aspas duplas, e o Node lê as quebras de linha corretamente. A pasta `keys/` está no `.gitignore`. Cada ambiente (desenvolvimento, produção) tem o seu par.
+
+O `.env` não é versionado. Os scripts carregam o arquivo com `node --env-file-if-exists=.env`, antes de qualquer `import`: se ele não existir (deploy, CI), o Node segue e usa as variáveis já definidas no ambiente. Carregar antes dos imports é necessário porque o `src/lib/jwt.js` lê as chaves no momento em que é importado. Rodando `node` direto, passar a flag: `node --env-file=.env <arquivo>`.
+
+Se as chaves estiverem faltando ou inválidas, o servidor não sobe (erro do `jose` no `importPKCS8`/`importSPKI`), em vez de falhar só no primeiro cadastro.
 
 ### Scripts
 
 | Comando | O que faz |
 | --- | --- |
-| `npm start` | Sobe o servidor (`node index.js`) |
-| `npm run dev` | Sobe com nodemon (reinicia ao salvar) |
-| `npm test` | Roda os testes (`node --test`) |
+| `npm start` | Sobe o servidor (`node --env-file-if-exists=.env index.js`) |
+| `npm run dev` | Sobe com nodemon (reinicia ao salvar), com a mesma flag |
+| `npm test` | Roda os testes (`node --env-file-if-exists=.env --test`) |
 | `npm run lint` | Roda o ESLint |
 
 ### Estrutura
 
 ```text
-index.js                 carrega o .env, escolhe as implementações e sobe o servidor
+index.js                 escolhe as implementações e sobe o servidor
 src/app.js               createApp({ emailSender, userProvisioner }): monta o app Express e as rotas
 src/lib/prisma.js        instância única do PrismaClient
 src/lib/app-error.js     AppError: erro de regra de negócio com status HTTP
+src/lib/jwt.js           carrega as chaves uma vez; signAccessToken e verifyAccessToken (jose, RS256)
 src/email-verification/
   email-verification.controller.js   valida a entrada (Joi) e traduz o resultado em HTTP
   email-verification.service.js      regras do request-pin: 409, 429, transação e envio
@@ -152,7 +170,7 @@ Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSe
 
 - `test/app.test.js`: chama o `/health` e confere status e corpo. Como o health consulta o banco, também prova a conexão.
 - `test/request-pin.test.js`: cobre `400`, `201` (com só o hash no banco), `429`, invalidação do PIN anterior, rollback com `500` quando o envio falha, `409` e a retentativa com `pending_provisioning`. O teste de rollback sobe um segundo app com um sender que sempre falha.
-- `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `active`, `provisioned_at` preenchido, só o hash Argon2id no banco e o back-end recebendo exatamente `authUserId`, e-mail e nome, `409` com rollback do consumo do PIN, `409` do back-end mantendo a conta `pending`, e as duas retentativas depois de `503` (com PIN novo e com o mesmo challenge), reaproveitando o mesmo `authUserId`. O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
+- `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `active`, um access token válido (conferido com o `verifyAccessToken`) com o `sub` da `user_auth`, `provisioned_at` preenchido, só o hash Argon2id no banco e o back-end recebendo exatamente `authUserId`, e-mail e nome, `409` com rollback do consumo do PIN, `409` do back-end mantendo a conta `pending`, e as duas retentativas depois de `503` (com PIN novo e com o mesmo challenge), reaproveitando o mesmo `authUserId` (que aparece no `sub` do token). O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
 - `test/http.user-provisioner.test.js`: sobe um Express fake no lugar do back-end e cobre `201`, `200`, `409` e `401` sem repetir, `500` e timeout repetindo 3 vezes, falha passageira resolvida pelo retry e back-end fora do ar. Usa timeout e espera curtos no construtor para não demorar.
 
 O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin e `teste-register-*@example.com` no register) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
@@ -242,7 +260,7 @@ O e-mail não vem no payload: ele vem da `email_verification`. `name` tem até 2
 
 | Status | Caso | Body |
 | --- | --- | --- |
-| `201` | Conta criada e USER confirmado no back-end | access token + refresh token |
+| `201` | Conta criada e USER confirmado no back-end | access token (ver abaixo); o refresh token entra na #256 |
 | `400` | Payload inválido ou termos não aceitos | erro padrão |
 | `401` | PIN errado (incrementa `attempts`) | erro padrão |
 | `404` | `challengeId` não existe | erro padrão |
@@ -253,7 +271,90 @@ O e-mail não vem no payload: ele vem da `email_verification`. `name` tem até 2
 
 Ordem das validações: challenge existe (`404`) → não consumido, invalidado nem expirado (`410`) → menos de 5 tentativas (`429`) → PIN confere (`401` e `attempts + 1`). Depois, numa transação: consome o challenge (update condicional) e cria a `user_auth`. Se o e-mail já tem `user_auth` em `pending_provisioning`, a linha é reaproveitada (mesmo `auth_user_id`) e recebe a senha e o aceite novos.
 
-**Etapa atual (#253):** o `register` já cria o USER no back-end e marca a `user_auth` como `active`, mas ainda não emite tokens. Com sucesso, responde `201 { "authUserId": "uuid" }`. Os tokens entram na #254, quando a resposta passa a ser a da tabela acima.
+Depois do back-end confirmar, a `user_auth` vira `active` e só então o access token é emitido. Falha de PIN, de payload ou do back-end lança erro antes, então nenhum token sai nesses casos.
+
+Resposta `201` (formato do OAuth 2.0, RFC 6749, em camelCase):
+
+```json
+{
+  "accessToken": "eyJhbGciOiJSUzI1NiJ9...",
+  "tokenType": "Bearer",
+  "expiresIn": 900
+}
+```
+
+- `tokenType: "Bearer"`: o front envia o token como `Authorization: Bearer <accessToken>`.
+- `expiresIn`: segundos até o token vencer, para o front saber quando renovar sem decodificar o token.
+- `refreshToken`: entra na #256.
+- O `authUserId` não vem na resposta: ele já está no `sub` do token, e o front identifica o usuário chamando o back-end com o token.
+
+### Access token (JWT)
+
+Emitido pelo `signAccessToken` (`src/lib/jwt.js`), assinado com RS256 e a chave privada. Decisão registrada na ADR-012 (wiki).
+
+| Parte | Conteúdo |
+| --- | --- |
+| Header | `{ "alg": "RS256" }` |
+| `sub` | `authUserId` (`user_auth.id`), o identificador estável da identidade |
+| `iss` | `hospetse-auth-service` |
+| `aud` | `hospetse-backend` |
+| `iat` | Momento da emissão (segundos Unix) |
+| `exp` | `iat` + 900 (15 min, `ACCESS_TOKEN_TTL_SECONDS`) |
+
+O payload é só base64, então qualquer um consegue ler: e-mail, nome e outros dados pessoais não vão no token. O back-end busca o USER pelo `sub`.
+
+Um JWT não pode ser revogado antes do `exp`. Por isso a vida curta: um token roubado vale no máximo 15 minutos, e a renovação é feita pelo refresh token, que pode ser revogado.
+
+#### Como o back-end principal valida
+
+O back-end não chama o Auth Server para validar: ele tem a chave pública e confere o token sozinho, em toda requisição protegida. Ele **não consegue emitir** tokens, porque só a privada assina.
+
+Ordem da validação (o `jwtVerify` do `jose` faz tudo numa chamada):
+
+1. Header `Authorization: Bearer <token>` presente.
+2. Assinatura confere com a chave pública e o `alg` é `RS256` (recusa `none`, `HS256` e outros).
+3. `exp` não passou.
+4. `iss` é `hospetse-auth-service` e `aud` é `hospetse-backend`.
+5. Localiza o USER por `users.auth_user_id = sub`.
+
+Qualquer falha nos passos 1 a 4 responde `401`. O back-end usa a mesma lógica do `verifyAccessToken` deste repositório, num middleware do Express. Exemplo:
+
+```js
+import { importSPKI, jwtVerify } from 'jose';
+
+const publicKey = await importSPKI(process.env.JWT_PUBLIC_KEY, 'RS256');
+
+export async function authenticate(req, res, next) {
+    const [type, token] = (req.headers.authorization ?? '').split(' ');
+    if (type !== 'Bearer' || !token) {
+        return res.status(401).json({ error: 'Token ausente' });
+    }
+
+    try {
+        const { payload } = await jwtVerify(token, publicKey, {
+            issuer: 'hospetse-auth-service',
+            audience: 'hospetse-backend',
+            algorithms: ['RS256'],
+        });
+        req.authUserId = payload.sub;
+        next();
+    } catch {
+        return res.status(401).json({ error: 'Token inválido ou expirado' });
+    }
+}
+```
+
+O back-end recebe só o `JWT_PUBLIC_KEY` (o mesmo conteúdo de `keys/public.pem`). A chave privada nunca sai do Auth Server; se a pública vazar, ninguém consegue forjar tokens com ela.
+
+Erros que o `jose` lança (`err.code`), úteis no log:
+
+| Código | Quando |
+| --- | --- |
+| `ERR_JWS_SIGNATURE_VERIFICATION_FAILED` | Token adulterado ou assinado com outra chave |
+| `ERR_JWT_EXPIRED` | Passou do `exp` |
+| `ERR_JWT_CLAIM_VALIDATION_FAILED` | `iss` ou `aud` diferente do esperado |
+
+Neste repositório o `verifyAccessToken` é usado pelos testes, para provar que o token emitido é válido.
 
 ### `POST /api/v1/auth/refresh`
 
@@ -390,6 +491,8 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **Confirmação de senha:** só no front. Ela evita erro de digitação, mas não traz segurança na API.
 - **Envio de e-mail:** interface `EmailSender` injetada a partir do `index.js`, para trocar o provedor (ou usar um fake nos testes) sem mudar o caso de uso.
 - **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
+- **Biblioteca do JWT:** `jose` (ADR-012): ES Modules, `async/await`, sem dependências, e amarra cada chave a um algoritmo.
+- **Access token:** 15 min, claims `sub`, `iss`, `aud`, `iat` e `exp`, sem dados pessoais (ADR-012).
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
 - **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio. A chamada fica fora da transação do `register`, para a `user_auth` `pending` sobreviver à falha e permitir a retentativa com o mesmo `authUserId`.
 - **Vínculo USER ↔ identidade:** o back-end guarda o `authUserId` em `users.auth_user_id` (UNIQUE), separado do `users.id`.
@@ -401,14 +504,16 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - Regras da senha: tamanho mínimo, máximo e composição (decisão da PO na #252). Por enquanto a API só exige a senha.
 - Mover tamanho do PIN (6), expiração (15 min) e intervalo de reenvio (60 s) do código para variáveis de ambiente.
 - Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`.
-- Expiração do access token (~15 min, conforme #56) e do refresh token.
+- Expiração do refresh token (a do access token foi decidida: 15 min, ADR-012).
 - Se o refresh token é rotacionado (trocado por um novo) a cada renovação.
 - Se a checagem de e-mail duplicado fica no `request-pin` (como acima) ou numa rota separada. Em ambos os casos, precisa de rate limit.
 - Confirmação da PO de que a `passwordConfirmation` fica só no front (recomendação técnica registrada na #252).
 - Se o `termsVersion` aceito precisa ser a versão vigente (ex.: env `TERMS_VERSION`) ou qualquer versão.
 - Formato exato do erro padrão (#56) e lista de códigos de erro.
-- Claims do JWT de usuário (`sub`, `iss`, `aud`, `iat`, `exp`).
-- Token de serviço da rota interna: o `HttpUserProvisioner` ainda não envia autenticação. Depende das chaves RS256 (#254) ou de um segredo provisório.
+- Token de serviço da rota interna: o `HttpUserProvisioner` ainda não envia autenticação. As chaves RS256 já existem (#254); falta emitir o token com `aud: "hospetse-backend-internal"` e o back-end validar na rota interna.
+- Rotação das chaves do JWT: como trocar o par sem invalidar de uma vez os tokens que ainda valem (ex.: `kid` no header e o back-end aceitando duas chaves públicas durante a troca).
+- Entrega da chave pública ao back-end: copiar o PEM para o `.env` do back-end (forma atual) ou publicar um JWKS no Auth Server para o back-end buscar.
+- Mover `iss`, `aud` e a validade do access token do código para variáveis de ambiente, se precisar variar por ambiente.
 - Rota interna no back-end (`PUT /api/v1/internal/users/{authUserId}`), com `users.auth_user_id` UNIQUE, criação do TUTOR com o nome e `users.password` deixando de ser obrigatório.
 - Mover o timeout (3 s) e as tentativas (3) do `HttpUserProvisioner` para variáveis de ambiente, se precisar ajustar por ambiente.
 - User agent / dados do dispositivo na sessão (depois).
