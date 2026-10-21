@@ -69,6 +69,7 @@ test('register: PIN e payload válidos criam o USER no back-end, ativam a user_a
 
     assert.strictEqual(response.status, 201);
     assert.ok(response.data.accessToken);
+    assert.ok(response.data.refreshToken);
 
     // o token precisa ser válido (assinatura, exp, iss, aud) e ter no sub a user_auth criada
     const { sub } = await verifyAccessToken(response.data.accessToken);
