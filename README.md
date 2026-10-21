@@ -8,8 +8,8 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 
 ## Estado atual
 
-- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry, e emite o access token JWT RS256) e testes automatizados das três rotas.
-- Ainda não implementado: o refresh token e a rota `refresh` (#256) e o token de serviço da rota interna, descritos em [Rotas](#rotas). Eles são o contrato que as próximas Tasks implementam.
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry, e emite o access token JWT RS256 e o refresh token), rota `POST /api/v1/auth/refresh` (renova o access token com rotação do refresh token e detecção de reuso) e testes automatizados das rotas.
+- Ainda não implementado: o token de serviço da rota interna e o logout (#297), descritos em [Rotas](#rotas) e nas [pendências](#pendente-tbd).
 - A rota interna `PUT /api/v1/internal/users/{authUserId}` ainda não existe no back-end. Em desenvolvimento, sem ela o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
@@ -95,6 +95,9 @@ src/email-verification/
 src/user-auth/
   user-auth.controller.js            valida o payload do register (Joi)
   user-auth.service.js               regras do register: PIN, tentativas, hash da senha, transação, provisionamento
+src/refresh-token/
+  refresh-token.controller.js        valida o payload do refresh (Joi)
+  refresh-token.service.js           issueRefreshToken (gera e salva o hash) e refreshService (valida, rotaciona, detecta reuso)
 src/user-provisioning/
   user-provisioner.interface.js      contrato UserProvisioner: provision({ authUserId, email, name })
   http.user-provisioner.js           implementação real (PUT na rota interna, timeout e retry)
@@ -105,6 +108,7 @@ prisma.config.ts         configuração do Prisma CLI
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
+test/refresh-token.test.js  testes do refresh
 test/http.user-provisioner.test.js  testes do HttpUserProvisioner contra um back-end fake
 ```
 
@@ -171,9 +175,10 @@ Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSe
 - `test/app.test.js`: chama o `/health` e confere status e corpo. Como o health consulta o banco, também prova a conexão.
 - `test/request-pin.test.js`: cobre `400`, `201` (com só o hash no banco), `429`, invalidação do PIN anterior, rollback com `500` quando o envio falha, `409` e a retentativa com `pending_provisioning`. O teste de rollback sobe um segundo app com um sender que sempre falha.
 - `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `active`, um access token válido (conferido com o `verifyAccessToken`) com o `sub` da `user_auth`, `provisioned_at` preenchido, só o hash Argon2id no banco e o back-end recebendo exatamente `authUserId`, e-mail e nome, `409` com rollback do consumo do PIN, `409` do back-end mantendo a conta `pending`, e as duas retentativas depois de `503` (com PIN novo e com o mesmo challenge), reaproveitando o mesmo `authUserId` (que aparece no `sub` do token). O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
+- `test/refresh-token.test.js`: cobre `400` (sem token e base64 comum), `401` para token não emitido, expirado e de conta que não está `active`, o `register` devolvendo o refresh token com só o SHA-256 no banco, `200` com access token válido (`sub` certo) e rotação (token novo, usado revogado), reuso (`401` e todos os tokens da conta revogados), duas renovações simultâneas (uma `200`, nunca dois tokens válidos) e o token fora dos logs. Para testar só o refresh, cria a `user_auth` direto no banco e emite com o `issueRefreshToken`; expirado é gravado direto no banco.
 - `test/http.user-provisioner.test.js`: sobe um Express fake no lugar do back-end e cobre `201`, `200`, `409` e `401` sem repetir, `500` e timeout repetindo 3 vezes, falha passageira resolvida pelo retry e back-end fora do ar. Usa timeout e espera curtos no construtor para não demorar.
 
-O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin e `teste-register-*@example.com` no register) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
+O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin, `teste-register-*@example.com` no register e `teste-refresh-*@example.com` no refresh) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
 
 ## Visão geral
 
@@ -260,7 +265,7 @@ O e-mail não vem no payload: ele vem da `email_verification`. `name` tem até 2
 
 | Status | Caso | Body |
 | --- | --- | --- |
-| `201` | Conta criada e USER confirmado no back-end | access token (ver abaixo); o refresh token entra na #256 |
+| `201` | Conta criada e USER confirmado no back-end | access token e refresh token (ver abaixo) |
 | `400` | Payload inválido ou termos não aceitos | erro padrão |
 | `401` | PIN errado (incrementa `attempts`) | erro padrão |
 | `404` | `challengeId` não existe | erro padrão |
@@ -271,7 +276,7 @@ O e-mail não vem no payload: ele vem da `email_verification`. `name` tem até 2
 
 Ordem das validações: challenge existe (`404`) → não consumido, invalidado nem expirado (`410`) → menos de 5 tentativas (`429`) → PIN confere (`401` e `attempts + 1`). Depois, numa transação: consome o challenge (update condicional) e cria a `user_auth`. Se o e-mail já tem `user_auth` em `pending_provisioning`, a linha é reaproveitada (mesmo `auth_user_id`) e recebe a senha e o aceite novos.
 
-Depois do back-end confirmar, a `user_auth` vira `active` e só então o access token é emitido. Falha de PIN, de payload ou do back-end lança erro antes, então nenhum token sai nesses casos.
+Depois do back-end confirmar, a `user_auth` vira `active` e só então os tokens são emitidos. Falha de PIN, de payload ou do back-end lança erro antes, então nenhum token sai nesses casos.
 
 Resposta `201` (formato do OAuth 2.0, RFC 6749, em camelCase):
 
@@ -279,13 +284,14 @@ Resposta `201` (formato do OAuth 2.0, RFC 6749, em camelCase):
 {
   "accessToken": "eyJhbGciOiJSUzI1NiJ9...",
   "tokenType": "Bearer",
-  "expiresIn": 900
+  "expiresIn": 900,
+  "refreshToken": "q3J9vXk2..."
 }
 ```
 
 - `tokenType: "Bearer"`: o front envia o token como `Authorization: Bearer <accessToken>`.
 - `expiresIn`: segundos até o token vencer, para o front saber quando renovar sem decodificar o token.
-- `refreshToken`: entra na #256.
+- `refreshToken`: usado só na rota [`refresh`](#post-apiv1authrefresh), nunca enviado ao back-end. O front guarda em secure storage (ADR-005).
 - O `authUserId` não vem na resposta: ele já está no `sub` do token, e o front identifica o usuário chamando o back-end com o token.
 
 ### Access token (JWT)
@@ -358,14 +364,54 @@ Neste repositório o `verifyAccessToken` é usado pelos testes, para provar que 
 
 ### `POST /api/v1/auth/refresh`
 
-Troca um refresh token válido por um novo access token.
+Troca um refresh token válido por um novo access token e um novo refresh token (rotação). O front chama quando o access token vence: o back-end responde `401`, o front renova e refaz a chamada.
 
-Request: refresh token (mobile no body; web no cookie httpOnly, conforme ADR-005).
+Request (mobile, no body; o cookie httpOnly da web é [TBD](#pendente-tbd)):
+
+```json
+{
+  "refreshToken": "q3J9vXk2..."
+}
+```
 
 | Status | Caso | Body |
 | --- | --- | --- |
-| `200` | Token válido | access token (e novo refresh, se houver rotação) |
-| `401` | Refresh inválido, expirado ou revogado | erro padrão |
+| `200` | Token válido | `{ accessToken, tokenType, expiresIn, refreshToken }`, no mesmo formato do `register` |
+| `400` | Payload sem `refreshToken` ou fora do formato base64url | erro padrão |
+| `401` | Token não emitido pelo Auth, expirado, revogado, reusado ou de conta que não está `active` | erro padrão, com a mesma mensagem em todos os casos |
+
+`401` no `refresh` significa que a sessão acabou: o front apaga os tokens e manda para o login. A mensagem é a mesma em todos os casos para não contar a quem tem um token roubado por que ele falhou.
+
+#### Como o refresh token funciona
+
+- **Geração:** 32 bytes de `crypto.randomBytes` em base64url (43 caracteres, 256 bits). Não é JWT: é um valor opaco que só o Auth entende.
+- **Armazenamento:** o banco guarda só o SHA-256 em hex (`token_hash`). Se o banco vazar, os hashes não servem na rota, porque o Auth calcula o hash do que recebe. SHA-256 sem chave basta porque o token tem 256 bits aleatórios (não dá para testar combinações, como no PIN), e por ser determinístico permite buscar pelo `UNIQUE (token_hash)`.
+- **Validade:** 30 dias (`REFRESH_TOKEN_TTL_DAYS`). Como cada renovação emite um token novo, quem usa o app pelo menos uma vez a cada 30 dias não precisa logar de novo.
+- **Emissão:** no `register`, depois do `active`, e em cada renovação. O `issueRefreshToken(userAuthId, db)` recebe o cliente da transação quando roda dentro de uma.
+
+Ordem das validações no `refresh`:
+
+1. Busca pelo hash; não existe → `401`.
+2. Já revogado → **reuso**: revoga todos os tokens da conta e responde `401`.
+3. `expires_at` passou → `401`.
+4. `user_auth` não está `active` → `401`.
+5. Numa transação: revoga o token atual com update condicional (`WHERE id = ... AND revoked_at IS NULL`) e cria o novo. Se o update não alterar nenhuma linha (outra requisição usou o mesmo token antes), responde `401`.
+6. Emite o access token e devolve os dois.
+
+**Rotação:** cada refresh token vale uma vez. Revogar o atual e criar o novo ficam na mesma transação: se o servidor cair no meio, nada muda, e o usuário nunca fica sem token nem com dois.
+
+**Detecção de reuso:** um token já rotacionado só volta se alguém tem uma cópia. O Auth não sabe quem é o dono e quem é o atacante, então revoga todos os tokens da conta e os dois precisam logar de novo; só o dono tem a senha. Essa revogação fica fora de transação de propósito: o `throw` logo depois desfaria a revogação num rollback.
+
+**Renovações simultâneas:** duas requisições com o mesmo token nunca geram dois tokens válidos. Se a segunda lê o banco antes da primeira terminar, perde no update condicional (`401`, e o token da primeira continua valendo); se lê depois, cai no reuso e a sessão inteira cai. Por isso o front precisa de uma **fila de refresh**: se já tem uma renovação em andamento, as outras chamadas esperam por ela em vez de disparar outra (orientação registrada na #300).
+
+```js
+let refreshing = null;   // a promessa do refresh que está rodando
+
+refreshing ??= doRefresh().finally(() => { refreshing = null });
+const data = await refreshing;   // quem chegar depois espera o mesmo refresh
+```
+
+O refresh token nunca vai para o log: o controller registra só a mensagem do erro, e a mensagem do Joi não repete o valor recebido.
 
 ### `POST /api/v1/auth/login` (fora da #244)
 
@@ -467,9 +513,9 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 | --- | --- | --- |
 | `id` | UUID, PK | Gerado pelo banco |
 | `user_auth_id` | UUID, FK → `user_auth.id` | Dono do token |
-| `token_hash` | VARCHAR(255), UNIQUE | Hash do refresh token. O token original nunca é salvo |
-| `expires_at` | TIMESTAMPTZ | Refresh token expirado é rejeitado |
-| `revoked_at` | TIMESTAMPTZ, nulo | Preenchido na revogação (ex.: logout); token revogado é rejeitado |
+| `token_hash` | VARCHAR(255), UNIQUE | SHA-256 (hex) do refresh token. O token original nunca é salvo |
+| `expires_at` | TIMESTAMPTZ | 30 dias após a emissão. Refresh token expirado é rejeitado |
+| `revoked_at` | TIMESTAMPTZ, nulo | Preenchido na rotação (token usado), no reuso (todos da conta) e, na #297, no logout. Token revogado é rejeitado |
 | `created_at` | TIMESTAMPTZ | |
 
 Índices: `UNIQUE (token_hash)` para localizar o token na renovação; `(user_auth_id)` para revogar todos os tokens de um usuário.
@@ -478,7 +524,8 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 
 - Consumir o PIN e criar a `user_auth` acontecem na mesma transação.
 - O PIN é consumido com update condicional (`WHERE consumed_at IS NULL AND invalidated_at IS NULL AND expires_at > now()`), para que duas requisições simultâneas não usem o mesmo PIN. A exceção é a [retentativa](#retentativa) com `user_auth` em `pending_provisioning`.
-- PIN, senha e segredos nunca aparecem em logs.
+- O refresh token é revogado com o mesmo tipo de update condicional (`WHERE revoked_at IS NULL`), na mesma transação que cria o próximo.
+- PIN, senha, tokens e segredos nunca aparecem em logs.
 
 ## Decisões técnicas
 
@@ -494,6 +541,7 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **Biblioteca do JWT:** `jose` (ADR-012): ES Modules, `async/await`, sem dependências, e amarra cada chave a um algoritmo.
 - **Access token:** 15 min, claims `sub`, `iss`, `aud`, `iat` e `exp`, sem dados pessoais (ADR-012).
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
+- **Refresh token:** valor aleatório de 256 bits (não JWT), guardado só como SHA-256, validade de 30 dias, rotação a cada renovação e detecção de reuso revogando todos os tokens da conta. O access token não é revogável; o refresh é, no banco.
 - **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio. A chamada fica fora da transação do `register`, para a `user_auth` `pending` sobreviver à falha e permitir a retentativa com o mesmo `authUserId`.
 - **Vínculo USER ↔ identidade:** o back-end guarda o `authUserId` em `users.auth_user_id` (UNIQUE), separado do `users.id`.
 - **Nome no cadastro:** o `register` recebe o `name` e só repassa ao back-end, que cria o TUTOR com ele. O Auth não guarda o nome.
@@ -504,8 +552,11 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - Regras da senha: tamanho mínimo, máximo e composição (decisão da PO na #252). Por enquanto a API só exige a senha.
 - Mover tamanho do PIN (6), expiração (15 min) e intervalo de reenvio (60 s) do código para variáveis de ambiente.
 - Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`.
-- Expiração do refresh token (a do access token foi decidida: 15 min, ADR-012).
-- Se o refresh token é rotacionado (trocado por um novo) a cada renovação.
+- Refresh token na web por cookie httpOnly (ADR-005): hoje a rota lê só do body, que é o caso do mobile.
+- Logout com revogação do refresh token (#297) e revogação de todas as sessões na troca de senha (#286). A coluna `revoked_at` e a checagem no `refresh` já existem.
+- Janela de tolerância para o reuso: hoje, se a resposta do `refresh` se perde na rede e o front reenvia o mesmo token, cai no reuso e a sessão cai. Alternativa: aceitar o token recém-rotacionado por alguns segundos.
+- Limpeza dos refresh tokens vencidos ou revogados (job periódico).
+- Mover a validade do refresh token (30 dias) do código para variável de ambiente, se precisar variar por ambiente.
 - Se a checagem de e-mail duplicado fica no `request-pin` (como acima) ou numa rota separada. Em ambos os casos, precisa de rate limit.
 - Confirmação da PO de que a `passwordConfirmation` fica só no front (recomendação técnica registrada na #252).
 - Se o `termsVersion` aceito precisa ser a versão vigente (ex.: env `TERMS_VERSION`) ou qualquer versão.
