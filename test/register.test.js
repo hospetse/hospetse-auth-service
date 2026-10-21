@@ -111,6 +111,7 @@ test('register: PIN errado retorna 401, conta tentativa e não cria identidade',
     );
 
     assert.strictEqual(response.status, 401);
+    assert.ok(!response.data.accessToken);
 
     const challenge = await prisma.emailVerification.findUnique({
         where: { id: pinResponse.data.challengeId }
@@ -242,6 +243,7 @@ test('register: e-mail com user_auth ativa retorna 409 e desfaz o consumo do PIN
     );
 
     assert.strictEqual(response.status, 409);
+    assert.ok(!response.data.accessToken);
 
     // O 409 é lançado dentro da transação: o consumedAt do challenge é desfeito...
     const challenge = await prisma.emailVerification.findUnique({
@@ -270,10 +272,12 @@ test('register: back-end responde 409 retorna 409 e a user_auth fica pending', a
     userProvisioner.error = null;
 
     assert.strictEqual(response.status, 409);
+    assert.ok(!response.data.accessToken);
 
     const userAuth = await prisma.userAuth.findUnique({ where: { email } });
     assert.strictEqual(userAuth.status, 'pending_provisioning');
     assert.strictEqual(userAuth.provisionedAt, null);
+    assert.strictEqual(await prisma.refreshToken.count({ where: { userAuthId: userAuth.id } }), 0);
 });
 
 test('register: retentativa depois de falha no back-end reaproveita o mesmo authUserId e ativa', async () => {
@@ -293,6 +297,7 @@ test('register: retentativa depois de falha no back-end reaproveita o mesmo auth
     userProvisioner.error = null;
 
     assert.strictEqual(firstRegister.status, 503);
+    assert.ok(!firstRegister.data.accessToken);
     const pending = await prisma.userAuth.findUnique({ where: { email } });
     assert.strictEqual(pending.status, 'pending_provisioning');
 
