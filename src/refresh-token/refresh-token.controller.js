@@ -26,6 +26,5 @@ export function createRefreshController() {
             console.log(error.message) // só a mensagem: o refresh token nunca vai para o log
             return res.status(500).json({ error: 'Não foi possível renovar o token' });
         }
-
     }
 }

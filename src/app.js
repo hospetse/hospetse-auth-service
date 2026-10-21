@@ -2,6 +2,7 @@ import { createRequestPinController } from "./email-verification/email-verificat
 import { prisma } from "./lib/prisma.js";
 import express from "express";
 import { createRegisterController } from "./user-auth/user-auth.controller.js";
+import { createRefreshController } from "./refresh-token/refresh-token.controller.js";
 
 export function createApp({ emailSender, userProvisioner }) {
     const app = express();
@@ -28,6 +29,7 @@ export function createApp({ emailSender, userProvisioner }) {
 
     app.post('/api/v1/auth/request-pin', createRequestPinController(emailSender));
     app.post('/api/v1/auth/register', createRegisterController(userProvisioner));
+    app.post('/api/v1/auth/refresh', createRefreshController());
     return app
 }
 
