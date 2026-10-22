@@ -109,6 +109,8 @@ test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
 test/refresh-token.test.js  testes do refresh
+test/jwt.test.js         testes do access token: claims e o que o verify recusa (sem banco)
+test/auth-flow.test.js   fluxo completo com o HttpUserProvisioner contra um back-end fake
 test/http.user-provisioner.test.js  testes do HttpUserProvisioner contra um back-end fake
 ```
 
@@ -177,8 +179,12 @@ Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSe
 - `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `active`, um access token válido (conferido com o `verifyAccessToken`) com o `sub` da `user_auth`, `provisioned_at` preenchido, só o hash Argon2id no banco e o back-end recebendo exatamente `authUserId`, e-mail e nome, `409` com rollback do consumo do PIN, `409` do back-end mantendo a conta `pending`, e as duas retentativas depois de `503` (com PIN novo e com o mesmo challenge), reaproveitando o mesmo `authUserId` (que aparece no `sub` do token). O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
 - `test/refresh-token.test.js`: cobre `400` (sem token e base64 comum), `401` para token não emitido, expirado e de conta que não está `active`, o `register` devolvendo o refresh token com só o SHA-256 no banco, `200` com access token válido (`sub` certo) e rotação (token novo, usado revogado), reuso (`401` e todos os tokens da conta revogados), duas renovações simultâneas (uma `200`, nunca dois tokens válidos) e o token fora dos logs. Para testar só o refresh, cria a `user_auth` direto no banco e emite com o `issueRefreshToken`; expirado é gravado direto no banco.
 - `test/http.user-provisioner.test.js`: sobe um Express fake no lugar do back-end e cobre `201`, `200`, `409` e `401` sem repetir, `500` e timeout repetindo 3 vezes, falha passageira resolvida pelo retry e back-end fora do ar. Usa timeout e espera curtos no construtor para não demorar.
+- `test/jwt.test.js`: confere que o access token tem só `sub`, `iss`, `aud`, `iat` e `exp` (15 min) com header `RS256`, e que o `verifyAccessToken` recusa payload adulterado, assinatura de outra chave, `alg: none`, `HS256` com a chave pública como segredo, token expirado e `iss`/`aud` diferentes. Não usa banco.
+- `test/auth-flow.test.js`: integração com o `HttpUserProvisioner` de verdade, chamando por HTTP um Express fake que segue o contrato da rota interna (#259). Cobre o fluxo completo (PIN → cadastro → PUT no back-end com só e-mail e nome, com a conta ainda `pending` no momento da chamada → `201` → refresh), PIN errado sem chamar o back-end, back-end com erro e com timeout (`503`, conta `pending`, PIN consumido, nenhum token nem `refresh_token`) seguido da retentativa sem duplicar e com o mesmo `authUserId`, e um teste que captura o `console` durante o fluxo (com erros) e confere que PIN, senha, tokens, `PIN_HMAC_SECRET`, chave privada e e-mail não aparecem.
 
-O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin, `teste-register-*@example.com` no register e `teste-refresh-*@example.com` no refresh) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
+Os testes de falha do `register` também conferem que a resposta não traz `accessToken`.
+
+O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin, `teste-register-*@example.com` no register, `teste-refresh-*@example.com` no refresh e `teste-flow-*@example.com` no fluxo completo) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
 
 ## Visão geral
 
@@ -551,7 +557,8 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 
 - Regras da senha: tamanho mínimo, máximo e composição (decisão da PO na #252). Por enquanto a API só exige a senha.
 - Mover tamanho do PIN (6), expiração (15 min) e intervalo de reenvio (60 s) do código para variáveis de ambiente.
-- Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`.
+- Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`. Até lá, o `ConsoleEmailSender` mostra o PIN no terminal de propósito (é a única exceção à regra de PIN fora dos logs, e só em desenvolvimento).
+- Teste do fluxo contra o back-end real: o `auth-flow.test.js` usa um back-end fake com o contrato da #259, porque a rota interna ainda não existe (#261). Quando existir, validar o fluxo ponta a ponta com o back-end de verdade.
 - Refresh token na web por cookie httpOnly (ADR-005): hoje a rota lê só do body, que é o caso do mobile.
 - Logout com revogação do refresh token (#297) e revogação de todas as sessões na troca de senha (#286). A coluna `revoked_at` e a checagem no `refresh` já existem.
 - Janela de tolerância para o reuso: hoje, se a resposta do `refresh` se perde na rede e o front reenvia o mesmo token, cai no reuso e a sessão cai. Alternativa: aceitar o token recém-rotacionado por alguns segundos.
