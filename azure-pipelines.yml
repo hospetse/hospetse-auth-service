@@ -25,9 +25,9 @@ stages:
         services:
           postgres: postgres
         steps:
-          - task: NodeTool@0
+          - task: UseNode@1
             inputs:
-              versionSpec: 22.x
+              version: 22.x
           - script: npm ci
             displayName: Instalar dependências
           - script: npm run lint
@@ -40,6 +40,8 @@ stages:
               export JWT_PUBLIC_KEY="$(cat public.pem)"
               export PIN_HMAC_SECRET="$(openssl rand -hex 32)"
               export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/auth_test"
+              # A VM começa sem o client do Prisma gerado
+              npx prisma generate
               npx prisma migrate deploy
               npm test
             displayName: Migrations e testes
