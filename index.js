@@ -7,7 +7,7 @@ const port = process.env.PORT;
 
 const app = createApp({
     emailSender: new ConsoleEmailSender(),
-    userProvisioner: new HttpUserProvisioner(process.env.BACKEND_URL),
+    userProvisioner: new HttpUserProvisioner(process.env.BACKEND_URL, process.env.INTERNAL_SERVICE_TOKEN),
 })
 
 app.listen(port, () => {

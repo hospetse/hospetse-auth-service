@@ -4,6 +4,7 @@ import express from 'express';
 import { HttpUserProvisioner } from '../src/user-provisioning/http.user-provisioner.js';
 
 // Back-end fake: imita a rota interna. O authUserId escolhe a resposta, e `calls` conta as chamadas.
+const SERVICE_TOKEN = 'token-de-servico-teste';
 const calls = {};
 let flakyCount = 0;
 
@@ -13,6 +14,11 @@ backend.put('/api/v1/internal/users/:authUserId', (req, res) => {
     const { authUserId } = req.params;
     calls[authUserId] = (calls[authUserId] ?? 0) + 1;
 
+    // Igual ao back-end real: sem o token de serviço certo, para aqui
+    if (req.headers.authorization !== `Bearer ${SERVICE_TOKEN}`) {
+        return res.sendStatus(401);
+    }
+
     if (authUserId === 'criado') {
         return res.status(201).json(req.body);
     }
@@ -21,9 +27,6 @@ backend.put('/api/v1/internal/users/:authUserId', (req, res) => {
     }
     if (authUserId === 'email-em-uso') {
         return res.sendStatus(409);
-    }
-    if (authUserId === 'token-invalido') {
-        return res.sendStatus(401);
     }
     if (authUserId === 'instavel') {
         flakyCount++;
@@ -39,7 +42,7 @@ const server = backend.listen(0);
 const { port } = server.address();
 
 // Timeout e espera curtos para o teste não demorar
-const provisioner = new HttpUserProvisioner(`http://localhost:${port}`, { timeout: 100, retryDelayMs: 10 });
+const provisioner = new HttpUserProvisioner(`http://localhost:${port}`, SERVICE_TOKEN, { timeout: 100, retryDelayMs: 10 });
 
 test('http-provisioner: 201 do back-end resolve sem erro e envia email e nome', async () => {
     await provisioner.provision({ authUserId: 'criado', email: 'tutor@example.com', name: 'Tutor Teste' });
@@ -62,9 +65,11 @@ test('http-provisioner: 409 vira AppError 409 e não repete', async () => {
     assert.strictEqual(calls['email-em-uso'], 1);
 });
 
-test('http-provisioner: 401 vira 503 e não repete', async () => {
+test('http-provisioner: token de serviço errado recebe 401, vira 503 e não repete', async () => {
+    const wrongToken = new HttpUserProvisioner(`http://localhost:${port}`, 'token-errado', { timeout: 100, retryDelayMs: 10 });
+
     await assert.rejects(
-        provisioner.provision({ authUserId: 'token-invalido', email: 'tutor@example.com', name: 'Tutor Teste' }),
+        wrongToken.provision({ authUserId: 'token-invalido', email: 'tutor@example.com', name: 'Tutor Teste' }),
         { statusCode: 503 }
     );
 
@@ -97,7 +102,7 @@ test('http-provisioner: timeout repete 3 vezes e depois vira 503', async () => {
 
 test('http-provisioner: back-end fora do ar vira 503', async () => {
     // Porta 1: ninguém escuta, a conexão é recusada (ECONNREFUSED)
-    const offline = new HttpUserProvisioner('http://localhost:1', { retryDelayMs: 10 });
+    const offline = new HttpUserProvisioner('http://localhost:1', SERVICE_TOKEN, { retryDelayMs: 10 });
 
     await assert.rejects(
         offline.provision({ authUserId: 'qualquer', email: 'tutor@example.com', name: 'Tutor Teste' }),

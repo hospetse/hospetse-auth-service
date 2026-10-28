@@ -16,10 +16,15 @@ import { verifyAccessToken } from '../src/lib/jwt.js';
 // e o status da user_auth no momento da chamada.
 let backendMode = 'ok';
 const backendCalls = [];
+const SERVICE_TOKEN = 'token-de-servico-teste';
 
 const backend = express();
 backend.use(express.json());
 backend.put('/api/v1/internal/users/:authUserId', async (req, res) => {
+    // Igual ao back-end real: sem o token de serviço certo, para aqui
+    if (req.headers.authorization !== `Bearer ${SERVICE_TOKEN}`) {
+        return res.sendStatus(401);
+    }
     if (backendMode === 'slow') {
         return setTimeout(() => res.sendStatus(201), 2500);
     }
@@ -35,7 +40,7 @@ backend.put('/api/v1/internal/users/:authUserId', async (req, res) => {
 const backendServer = backend.listen(0);
 
 // Timeout de 2 s (o fake consulta o banco de dev, que é remoto) e espera curta entre as tentativas
-const userProvisioner = new HttpUserProvisioner(`http://localhost:${backendServer.address().port}`, { timeout: 2000, retryDelayMs: 10 });
+const userProvisioner = new HttpUserProvisioner(`http://localhost:${backendServer.address().port}`, SERVICE_TOKEN, { timeout: 2000, retryDelayMs: 10 });
 const emailSender = new FakeEmailSender();
 const app = createApp({ emailSender, userProvisioner });
 const server = app.listen(0);
