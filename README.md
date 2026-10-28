@@ -9,8 +9,8 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 ## Estado atual
 
 - Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry, e emite o access token JWT RS256 e o refresh token), rota `POST /api/v1/auth/refresh` (renova o access token com rotação do refresh token e detecção de reuso) e testes automatizados das rotas.
-- Ainda não implementado: o token de serviço da rota interna e o logout (#297), descritos em [Rotas](#rotas) e nas [pendências](#pendente-tbd).
-- A rota interna `PUT /api/v1/internal/users/{authUserId}` ainda não existe no back-end. Em desenvolvimento, sem ela o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
+- Ainda não implementado: o logout (#297), descrito nas [pendências](#pendente-tbd).
+- A rota interna `PUT /api/v1/internal/users/{authUserId}` existe no back-end (#261) e é autenticada pelo segredo compartilhado `INTERNAL_SERVICE_TOKEN` (#473). Sem o back-end no ar ou com o token diferente, o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
 ## Stack
@@ -28,7 +28,7 @@ Pré-requisito: acesso à `DATABASE_URL` do banco do Auth Server (instância pr�
 
 ```bash
 npm install
-cp .env.example .env          # preencher DATABASE_URL, PORT, PIN_HMAC_SECRET, BACKEND_URL e as chaves JWT
+cp .env.example .env          # preencher DATABASE_URL, PORT, PIN_HMAC_SECRET, BACKEND_URL, INTERNAL_SERVICE_TOKEN e as chaves JWT
 npx prisma migrate deploy     # aplica as migrations no banco
 npx prisma generate           # gera o Prisma Client
 npm run dev
@@ -44,6 +44,7 @@ Conferir: `GET http://localhost:<PORT>/health` deve responder `200`.
 | `PORT` | Porta do servidor |
 | `PIN_HMAC_SECRET` | Chave secreta do HMAC-SHA256 usado no hash do PIN. Trocar a chave invalida os PINs abertos |
 | `BACKEND_URL` | URL base do back-end principal, usada na rota interna de criação do USER (ex.: `http://localhost:3000`) |
+| `INTERNAL_SERVICE_TOKEN` | Segredo compartilhado com o back-end, enviado como `Authorization: Bearer` na rota interna. Mesmo valor nos dois serviços. Gerar com `openssl rand -hex 32` |
 | `JWT_PRIVATE_KEY` | Chave privada RSA (PEM, PKCS#8) que assina os JWT. Existe só no Auth Server |
 | `JWT_PUBLIC_KEY` | Chave pública RSA (PEM, SPKI) do mesmo par. É a única que vai para o back-end principal |
 
@@ -435,7 +436,7 @@ Request:
 { "email": "tutor@exemplo.com", "name": "Maria Silva" }
 ```
 
-Autenticação: token de serviço (JWT curto assinado pelo Auth com a chave privada RS256, `aud: "hospetse-backend-internal"`). O back-end valida com a chave pública que já tem. A claim `aud` impede o uso de um token de usuário nesta rota.
+Autenticação: `Authorization: Bearer <INTERNAL_SERVICE_TOKEN>`, segredo compartilhado com o back-end (#473). É provisório: o alvo é um token de serviço (JWT curto assinado pelo Auth com a chave privada RS256, `aud: "hospetse-backend-internal"`), que o back-end valida com a chave pública que já tem, no mesmo cabeçalho.
 
 | Status | Caso |
 | --- | --- |
@@ -548,7 +549,7 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **Access token:** 15 min, claims `sub`, `iss`, `aud`, `iat` e `exp`, sem dados pessoais (ADR-012).
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
 - **Refresh token:** valor aleatório de 256 bits (não JWT), guardado só como SHA-256, validade de 30 dias, rotação a cada renovação e detecção de reuso revogando todos os tokens da conta. O access token não é revogável; o refresh é, no banco.
-- **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada por token de serviço RS256 com `aud` próprio. A chamada fica fora da transação do `register`, para a `user_auth` `pending` sobreviver à falha e permitir a retentativa com o mesmo `authUserId`.
+- **Comunicação Auth → back-end:** rota interna `PUT` idempotente, autenticada hoje por segredo compartilhado (`INTERNAL_SERVICE_TOKEN`) e, no futuro, por token de serviço RS256 com `aud` próprio. A chamada fica fora da transação do `register`, para a `user_auth` `pending` sobreviver à falha e permitir a retentativa com o mesmo `authUserId`.
 - **Vínculo USER ↔ identidade:** o back-end guarda o `authUserId` em `users.auth_user_id` (UNIQUE), separado do `users.id`.
 - **Nome no cadastro:** o `register` recebe o `name` e só repassa ao back-end, que cria o TUTOR com ele. O Auth não guarda o nome.
 - **Cliente HTTP:** axios, o mesmo dos testes. Fica em `dependencies`, porque o `HttpUserProvisioner` usa em produção.
@@ -558,7 +559,7 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - Regras da senha: tamanho mínimo, máximo e composição (decisão da PO na #252). Por enquanto a API só exige a senha.
 - Mover tamanho do PIN (6), expiração (15 min) e intervalo de reenvio (60 s) do código para variáveis de ambiente.
 - Provedor real de e-mail e a escolha da implementação por ambiente no `index.js`. Até lá, o `ConsoleEmailSender` mostra o PIN no terminal de propósito (é a única exceção à regra de PIN fora dos logs, e só em desenvolvimento).
-- Teste do fluxo contra o back-end real: o `auth-flow.test.js` usa um back-end fake com o contrato da #259, porque a rota interna ainda não existe (#261). Quando existir, validar o fluxo ponta a ponta com o back-end de verdade.
+- Teste do fluxo contra o back-end real: o `auth-flow.test.js` usa um back-end fake com o contrato da #259 e o mesmo `401` sem token. A rota interna já existe (#261): falta validar o fluxo ponta a ponta com o back-end de verdade.
 - Refresh token na web por cookie httpOnly (ADR-005): hoje a rota lê só do body, que é o caso do mobile.
 - Logout com revogação do refresh token (#297) e revogação de todas as sessões na troca de senha (#286). A coluna `revoked_at` e a checagem no `refresh` já existem.
 - Janela de tolerância para o reuso: hoje, se a resposta do `refresh` se perde na rede e o front reenvia o mesmo token, cai no reuso e a sessão cai. Alternativa: aceitar o token recém-rotacionado por alguns segundos.
@@ -568,7 +569,7 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - Confirmação da PO de que a `passwordConfirmation` fica só no front (recomendação técnica registrada na #252).
 - Se o `termsVersion` aceito precisa ser a versão vigente (ex.: env `TERMS_VERSION`) ou qualquer versão.
 - Formato exato do erro padrão (#56) e lista de códigos de erro.
-- Token de serviço da rota interna: o `HttpUserProvisioner` ainda não envia autenticação. As chaves RS256 já existem (#254); falta emitir o token com `aud: "hospetse-backend-internal"` e o back-end validar na rota interna.
+- Token de serviço RS256 na rota interna: hoje o `HttpUserProvisioner` envia o segredo compartilhado `INTERNAL_SERVICE_TOKEN` (#473). As chaves RS256 já existem (#254); falta emitir o token com `aud: "hospetse-backend-internal"` e o back-end validar na rota interna.
 - Rotação das chaves do JWT: como trocar o par sem invalidar de uma vez os tokens que ainda valem (ex.: `kid` no header e o back-end aceitando duas chaves públicas durante a troca).
 - Entrega da chave pública ao back-end: copiar o PEM para o `.env` do back-end (forma atual) ou publicar um JWKS no Auth Server para o back-end buscar.
 - Mover `iss`, `aud` e a validade do access token do código para variáveis de ambiente, se precisar variar por ambiente.

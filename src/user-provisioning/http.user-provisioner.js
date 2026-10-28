@@ -8,10 +8,15 @@ function wait(ms) {
 
 // Implementação real: cria o USER no back-end principal pela rota interna (PUT idempotente).
 export class HttpUserProvisioner extends UserProvisioner {
+    // serviceToken: segredo compartilhado com o back-end (INTERNAL_SERVICE_TOKEN), enviado em toda chamada.
     // options só para os testes deixarem tudo mais rápido; o index.js usa os padrões
-    constructor(baseUrl, { timeout = 3000, maxAttempts = 3, retryDelayMs = 200 } = {}) {
+    constructor(baseUrl, serviceToken, { timeout = 3000, maxAttempts = 3, retryDelayMs = 200 } = {}) {
         super();
-        this.http = axios.create({ baseURL: baseUrl, timeout });
+        this.http = axios.create({
+            baseURL: baseUrl,
+            timeout,
+            headers: { Authorization: `Bearer ${serviceToken}` },
+        });
         this.maxAttempts = maxAttempts;
         this.retryDelayMs = retryDelayMs;
     }
