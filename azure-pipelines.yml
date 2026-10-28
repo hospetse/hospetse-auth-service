@@ -1,0 +1,65 @@
+# Roda a cada push na develop e na main (o CD só publica a partir da develop).
+# O CI dos PRs é disparado pela branch policy (Build validation) de cada branch.
+trigger:
+  branches:
+    include: [develop, main]
+
+# Postgres descartável só para os testes do CI: nasce vazio e morre com a VM
+resources:
+  containers:
+    - container: postgres
+      image: postgres:16
+      env:
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: postgres
+        POSTGRES_DB: auth_test
+      ports:
+        - 5432:5432
+
+stages:
+  - stage: CI
+    jobs:
+      - job: lint_e_testes
+        pool:
+          vmImage: ubuntu-latest
+        services:
+          postgres: postgres
+        steps:
+          - task: UseNode@1
+            inputs:
+              version: 22.x
+          - script: npm ci
+            displayName: Instalar dependências
+          - script: npm run lint
+            displayName: Lint
+          - script: |
+              # Chaves e segredo só deste teste (descartados com a VM)
+              openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out private.pem
+              openssl pkey -in private.pem -pubout -out public.pem
+              export JWT_PRIVATE_KEY="$(cat private.pem)"
+              export JWT_PUBLIC_KEY="$(cat public.pem)"
+              export PIN_HMAC_SECRET="$(openssl rand -hex 32)"
+              export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/auth_test"
+              # A VM começa sem o client do Prisma gerado
+              npx prisma generate
+              npx prisma migrate deploy
+              npm test
+            displayName: Migrations e testes
+
+  - stage: CD
+    dependsOn: CI
+    # Só publica a partir da develop e nunca de um PR (o Railway tem um único ambiente por enquanto)
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'), ne(variables['Build.Reason'], 'PullRequest'))
+    variables:
+      - group: railway
+    jobs:
+      - job: deploy_railway
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: npm install -g @railway/cli
+            displayName: Instalar Railway CLI
+          - script: railway up --ci --service auth-service
+            displayName: Deploy no Railway
+            env:
+              RAILWAY_TOKEN: $(RAILWAY_TOKEN)
