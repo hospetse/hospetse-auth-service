@@ -108,6 +108,7 @@ prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
 docs/openapi.yaml        contrato OpenAPI 3.1 das rotas
 docs/index.html          página do Swagger UI servida em /docs
+railway.json             configuração do serviço no Railway (health check em /health)
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
