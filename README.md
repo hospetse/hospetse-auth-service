@@ -107,6 +107,7 @@ prisma/schema.prisma     modelos do banco
 prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
 docs/openapi.yaml        contrato OpenAPI 3.1 das rotas
+docs/index.html          página do Swagger UI servida em /docs
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
@@ -217,7 +218,7 @@ Front-end ──(rotas públicas)──> Auth Server ──(rota interna)──>
 
 Padrão (#56): prefixo `/api/v1/`, envelope de resposta e erro padronizado. Ações usam `POST` com o verbo no caminho.
 
-O contrato de todas as rotas está em [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.1). Para validar: `npx @redocly/cli lint docs/openapi.yaml`.
+O contrato de todas as rotas está em [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.1), navegável em `GET /docs` (Swagger UI) no servidor local e em produção: https://auth-service-production-36e0.up.railway.app/docs. Para validar: `npx @redocly/cli lint docs/openapi.yaml`.
 
 ### Status HTTP usados
 

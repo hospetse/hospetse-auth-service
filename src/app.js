@@ -1,6 +1,7 @@
 import { createRequestPinController } from "./email-verification/email-verification.controller.js";
 import { prisma } from "./lib/prisma.js";
 import express from "express";
+import { fileURLToPath } from "node:url";
 import { createLoginController, createRegisterController } from "./user-auth/user-auth.controller.js";
 import { createRefreshController } from "./refresh-token/refresh-token.controller.js";
 
@@ -26,6 +27,11 @@ export function createApp({ emailSender, userProvisioner }) {
             console.error(error);
         }
     });
+
+    // Documentação da API (#501): página do Swagger UI e o contrato que ela lê
+    const docsDir = fileURLToPath(new URL('../docs/', import.meta.url));
+    app.get('/docs', (req, res) => res.sendFile('index.html', { root: docsDir }));
+    app.get('/docs/openapi.yaml', (req, res) => res.type('text/yaml').sendFile('openapi.yaml', { root: docsDir }));
 
     app.post('/api/v1/auth/request-pin', createRequestPinController(emailSender));
     app.post('/api/v1/auth/register', createRegisterController(userProvisioner));

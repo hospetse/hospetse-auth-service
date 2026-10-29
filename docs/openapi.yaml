@@ -6,6 +6,8 @@ info:
     Cadastro com PIN por e-mail, login e emissão de tokens (access token JWT RS256 e refresh token opaco).
     O README traz o contexto de cada rota. Erros seguem `{ error }`; o formato definitivo depende da #56.
 servers:
+  - url: https://auth-service-production-36e0.up.railway.app
+    description: Produção (Railway)
   - url: http://localhost:3001
     description: Desenvolvimento local
 
@@ -15,6 +17,8 @@ security: []
 tags:
   - name: Saúde
     description: Health check
+  - name: Documentação
+    description: Esta documentação
   - name: Cadastro
     description: PIN por e-mail e criação da conta
   - name: Sessão
@@ -44,6 +48,30 @@ paths:
                 type: object
                 properties:
                   message: { type: string }
+
+  /docs:
+    get:
+      tags: [Documentação]
+      operationId: getDocs
+      summary: Página do Swagger UI com este contrato
+      responses:
+        '200':
+          description: Página HTML
+          content:
+            text/html:
+              schema: { type: string }
+
+  /docs/openapi.yaml:
+    get:
+      tags: [Documentação]
+      operationId: getOpenApi
+      summary: Este contrato em YAML
+      responses:
+        '200':
+          description: OpenAPI 3.1
+          content:
+            text/yaml:
+              schema: { type: string }
 
   /api/v1/auth/request-pin:
     post:
