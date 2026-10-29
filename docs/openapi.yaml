@@ -1,0 +1,204 @@
+openapi: 3.1.0
+info:
+  title: Hospetse Auth Server
+  version: 0.1.0
+  description: |
+    Cadastro com PIN por e-mail, login e emissão de tokens (access token JWT RS256 e refresh token opaco).
+    O README traz o contexto de cada rota. Erros seguem `{ error }`; o formato definitivo depende da #56.
+servers:
+  - url: http://localhost:3001
+    description: Desenvolvimento local
+
+# Rotas públicas: a autenticação é o próprio payload (PIN, senha ou refresh token)
+security: []
+
+tags:
+  - name: Saúde
+    description: Health check
+  - name: Cadastro
+    description: PIN por e-mail e criação da conta
+  - name: Sessão
+    description: Login e renovação dos tokens
+
+paths:
+  /health:
+    get:
+      tags: [Saúde]
+      operationId: getHealth
+      summary: Processo e banco no ar
+      responses:
+        '200':
+          description: Servidor e banco respondendo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server: { type: string }
+                  db: { type: string }
+        '503':
+          description: Banco fora do ar
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message: { type: string }
+
+  /api/v1/auth/request-pin:
+    post:
+      tags: [Cadastro]
+      operationId: requestPin
+      summary: Gera um PIN e envia por e-mail
+      description: Invalida o PIN anterior do mesmo e-mail. E-mail com conta `pending_provisioning` pode pedir PIN novo (retentativa).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email]
+              properties:
+                email: { type: string, format: email, maxLength: 255, description: Normalizado com trim e minúsculas }
+      responses:
+        '201':
+          description: PIN enviado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  challengeId: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: E-mail já cadastrado com conta `active` (o front leva ao login)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '429':
+          description: Reenvio antes do intervalo mínimo (60 s)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/auth/register:
+    post:
+      tags: [Cadastro]
+      operationId: register
+      summary: Valida o PIN, cria a conta e o USER no back-end e emite os tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [challengeId, name, pin, password, acceptedTerms, termsVersion]
+              properties:
+                challengeId: { type: string, format: uuid }
+                name: { type: string, maxLength: 255, description: Só repassado ao back-end (tutors.name) }
+                pin: { type: string, pattern: '^\d{6}$' }
+                password: { type: string }
+                acceptedTerms: { type: boolean, const: true }
+                termsVersion: { type: string, maxLength: 64 }
+      responses:
+        '201':
+          description: Conta criada e USER confirmado no back-end
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: PIN errado (conta uma tentativa)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '404':
+          description: '`challengeId` não existe'
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '409':
+          description: E-mail já cadastrado com conta `active`
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '410':
+          description: PIN expirado, invalidado ou já consumido
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '429':
+          description: Limite de 5 tentativas de PIN atingido
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '503':
+          description: Back-end não confirmou a criação do USER (a conta fica `pending_provisioning`)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Sessão]
+      operationId: login
+      summary: Autentica com e-mail e senha e emite os tokens (#296)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, maxLength: 255, description: Normalizado com trim e minúsculas }
+                password: { type: string }
+      responses:
+        '200':
+          description: Senha confere e a conta está `active`
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: E-mail sem conta ou senha errada, com a mesma mensagem nos dois casos
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '403':
+          description: Senha confere, mas o cadastro não foi concluído (`pending_provisioning`); pedir um novo PIN
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Sessão]
+      operationId: refresh
+      summary: Troca o refresh token por tokens novos (rotação)
+      description: Um refresh token já usado sendo apresentado de novo revoga todas as sessões da conta.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string, description: base64url sem padding }
+      responses:
+        '200':
+          description: Token válido
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Token não emitido, expirado, revogado, reusado ou de conta que não está `active` (mesma mensagem)
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    Tokens:
+      type: object
+      required: [accessToken, tokenType, expiresIn, refreshToken]
+      properties:
+        accessToken: { type: string, description: 'JWT RS256 com sub (authUserId), iss, aud, iat e exp' }
+        tokenType: { type: string, const: Bearer }
+        expiresIn: { type: integer, description: Segundos até o access token vencer, example: 900 }
+        refreshToken: { type: string, description: 'Opaco, 30 dias, usado só no refresh' }
+
+  responses:
+    BadRequest:
+      description: Payload inválido (validação Joi)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    InternalError:
+      description: Falha inesperada
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }

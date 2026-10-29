@@ -8,7 +8,7 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 
 ## Estado atual
 
-- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry, e emite o access token JWT RS256 e o refresh token), rota `POST /api/v1/auth/refresh` (renova o access token com rotação do refresh token e detecção de reuso) e testes automatizados das rotas.
+- Implementado: servidor Express, conexão com o banco via Prisma, as três tabelas (migrations `init` e `add_terms_to_user_auth`), rota `GET /health`, rota `POST /api/v1/auth/request-pin` (com interface de envio de e-mail), rota `POST /api/v1/auth/register` (cria a `user_auth` e o USER no back-end pela rota interna, com retry, e emite o access token JWT RS256 e o refresh token), rota `POST /api/v1/auth/refresh` (renova o access token com rotação do refresh token e detecção de reuso), rota `POST /api/v1/auth/login` (e-mail e senha, #296), contrato OpenAPI em `docs/openapi.yaml` e testes automatizados das rotas.
 - Ainda não implementado: o logout (#297), descrito nas [pendências](#pendente-tbd).
 - A rota interna `PUT /api/v1/internal/users/{authUserId}` existe no back-end (#261) e é autenticada pelo segredo compartilhado `INTERNAL_SERVICE_TOKEN` (#473). Sem o back-end no ar ou com o token diferente, o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
@@ -94,8 +94,8 @@ src/email-verification/
   console.email-sender.js            implementação de dev (mostra o e-mail no terminal)
   fake.email-sender.js               implementação de testes (guarda as mensagens)
 src/user-auth/
-  user-auth.controller.js            valida o payload do register (Joi)
-  user-auth.service.js               regras do register: PIN, tentativas, hash da senha, transação, provisionamento
+  user-auth.controller.js            valida o payload do register e do login (Joi)
+  user-auth.service.js               regras do register (PIN, tentativas, hash da senha, transação, provisionamento) e do login
 src/refresh-token/
   refresh-token.controller.js        valida o payload do refresh (Joi)
   refresh-token.service.js           issueRefreshToken (gera e salva o hash) e refreshService (valida, rotaciona, detecta reuso)
@@ -106,10 +106,12 @@ src/user-provisioning/
 prisma/schema.prisma     modelos do banco
 prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
+docs/openapi.yaml        contrato OpenAPI 3.1 das rotas
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
 test/refresh-token.test.js  testes do refresh
+test/login.test.js       testes do login
 test/jwt.test.js         testes do access token: claims e o que o verify recusa (sem banco)
 test/auth-flow.test.js   fluxo completo com o HttpUserProvisioner contra um back-end fake
 test/http.user-provisioner.test.js  testes do HttpUserProvisioner contra um back-end fake
@@ -179,13 +181,14 @@ Os testes sobem o app numa porta aleatória (`app.listen(0)`) com o `FakeEmailSe
 - `test/request-pin.test.js`: cobre `400`, `201` (com só o hash no banco), `429`, invalidação do PIN anterior, rollback com `500` quando o envio falha, `409` e a retentativa com `pending_provisioning`. O teste de rollback sobe um segundo app com um sender que sempre falha.
 - `test/register.test.js`: cobre `400` (payload e termos não aceitos), `404`, `401` contando a tentativa, `429` no limite (mesmo com o PIN certo), `410` para PIN expirado, invalidado e reutilizado, `201` com a `user_auth` `active`, um access token válido (conferido com o `verifyAccessToken`) com o `sub` da `user_auth`, `provisioned_at` preenchido, só o hash Argon2id no banco e o back-end recebendo exatamente `authUserId`, e-mail e nome, `409` com rollback do consumo do PIN, `409` do back-end mantendo a conta `pending`, e as duas retentativas depois de `503` (com PIN novo e com o mesmo challenge), reaproveitando o mesmo `authUserId` (que aparece no `sub` do token). O PIN vem do fluxo real: o teste chama o `request-pin` e lê o PIN no `FakeEmailSender`. Estados difíceis de reproduzir (5 tentativas, PIN vencido) são gravados direto no banco.
 - `test/refresh-token.test.js`: cobre `400` (sem token e base64 comum), `401` para token não emitido, expirado e de conta que não está `active`, o `register` devolvendo o refresh token com só o SHA-256 no banco, `200` com access token válido (`sub` certo) e rotação (token novo, usado revogado), reuso (`401` e todos os tokens da conta revogados), duas renovações simultâneas (uma `200`, nunca dois tokens válidos) e o token fora dos logs. Para testar só o refresh, cria a `user_auth` direto no banco e emite com o `issueRefreshToken`; expirado é gravado direto no banco.
+- `test/login.test.js`: cobre `400` (sem senha e e-mail inválido), `200` com access token válido (`sub` da `user_auth`) e refresh token que funciona no `refresh`, e-mail com maiúsculas e espaços normalizado, o mesmo `401` (corpo idêntico) para senha errada e e-mail inexistente, `403` sem token nem `refresh_token` para conta `pending_provisioning` com a senha certa e `401` para a mesma conta com a senha errada. Cria a `user_auth` direto no banco com o hash Argon2id da senha de teste.
 - `test/http.user-provisioner.test.js`: sobe um Express fake no lugar do back-end e cobre `201`, `200`, `409` e `401` sem repetir, `500` e timeout repetindo 3 vezes, falha passageira resolvida pelo retry e back-end fora do ar. Usa timeout e espera curtos no construtor para não demorar.
 - `test/jwt.test.js`: confere que o access token tem só `sub`, `iss`, `aud`, `iat` e `exp` (15 min) com header `RS256`, e que o `verifyAccessToken` recusa payload adulterado, assinatura de outra chave, `alg: none`, `HS256` com a chave pública como segredo, token expirado e `iss`/`aud` diferentes. Não usa banco.
 - `test/auth-flow.test.js`: integração com o `HttpUserProvisioner` de verdade, chamando por HTTP um Express fake que segue o contrato da rota interna (#259). Cobre o fluxo completo (PIN → cadastro → PUT no back-end com só e-mail e nome, com a conta ainda `pending` no momento da chamada → `201` → refresh), PIN errado sem chamar o back-end, back-end com erro e com timeout (`503`, conta `pending`, PIN consumido, nenhum token nem `refresh_token`) seguido da retentativa sem duplicar e com o mesmo `authUserId`, e um teste que captura o `console` durante o fluxo (com erros) e confere que PIN, senha, tokens, `PIN_HMAC_SECRET`, chave privada e e-mail não aparecem.
 
 Os testes de falha do `register` também conferem que a resposta não traz `accessToken`.
 
-O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin, `teste-register-*@example.com` no register, `teste-refresh-*@example.com` no refresh e `teste-flow-*@example.com` no fluxo completo) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
+O banco de desenvolvimento é compartilhado. Por isso os testes usam e-mails de teste (`teste-auth-*@example.com` no request-pin, `teste-register-*@example.com` no register, `teste-refresh-*@example.com` no refresh, `teste-login-*@example.com` no login e `teste-flow-*@example.com` no fluxo completo) e apagam o que criaram (`email_verification` e `user_auth`) no `after()`, que também fecha os servidores e a conexão do Prisma. Os prefixos são separados porque o `node --test` roda os arquivos em paralelo: com o mesmo prefixo, a limpeza de um arquivo apagaria os dados do outro no meio do teste.
 
 ## Visão geral
 
@@ -212,6 +215,8 @@ Front-end ──(rotas públicas)──> Auth Server ──(rota interna)──>
 
 Padrão (#56): prefixo `/api/v1/`, envelope de resposta e erro padronizado. Ações usam `POST` com o verbo no caminho.
 
+O contrato de todas as rotas está em [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.1). Para validar: `npx @redocly/cli lint docs/openapi.yaml`.
+
 ### Status HTTP usados
 
 | Código | Quando |
@@ -220,6 +225,7 @@ Padrão (#56): prefixo `/api/v1/`, envelope de resposta e erro padronizado. Aç�
 | `201 Created` | Criou algo novo |
 | `400 Bad Request` | Payload inválido (validação Joi) |
 | `401 Unauthorized` | Credencial ou token inválido |
+| `403 Forbidden` | Credencial certa, mas a conta não pode entrar (cadastro não concluído) |
 | `404 Not Found` | Recurso não existe |
 | `409 Conflict` | Conflito, ex.: e-mail já cadastrado |
 | `410 Gone` | O recurso existia, mas não vale mais (PIN expirado, consumido ou invalidado) |
@@ -420,9 +426,31 @@ const data = await refreshing;   // quem chegar depois espera o mesmo refresh
 
 O refresh token nunca vai para o log: o controller registra só a mensagem do erro, e a mensagem do Joi não repete o valor recebido.
 
-### `POST /api/v1/auth/login` (fora da #244)
+### `POST /api/v1/auth/login`
 
-Fica para outra PBI. Sucesso: `200` + tokens. Credencial inválida: `401`.
+Autentica com e-mail e senha e emite os tokens (Task #296, HSP-PBI-005-TSK-02). Usado por quem já tem conta, depois que o access token e o refresh token acabaram (ou em outro aparelho).
+
+Request:
+
+```json
+{ "email": "tutor@exemplo.com", "password": "..." }
+```
+
+O e-mail passa pela mesma normalização do `request-pin` (trim e minúsculas, até 255 caracteres).
+
+| Status | Caso | Body |
+| --- | --- | --- |
+| `200` | Senha confere e a `user_auth` está `active` | `{ accessToken, tokenType, expiresIn, refreshToken }`, no mesmo formato do `register` |
+| `400` | Payload sem e-mail válido ou sem senha | erro padrão |
+| `401` | E-mail sem conta ou senha errada | erro padrão, com a mesma mensagem nos dois casos |
+| `403` | Senha confere, mas a `user_auth` está `pending_provisioning` (o back-end não confirmou o cadastro) | erro padrão; o front orienta a pedir um novo PIN para terminar o cadastro (ver [Retentativa](#retentativa)) |
+| `500` | Falha inesperada | erro padrão |
+
+- **Sem enumeração de contas:** e-mail inexistente e senha errada respondem igual. Quando o e-mail não existe, o `argon2.verify` roda mesmo assim contra o hash de uma senha aleatória, para o tempo de resposta também não denunciar quais e-mails têm conta.
+- **`403` só depois da senha:** quem não sabe a senha recebe `401` mesmo numa conta `pending`, então só o dono descobre que o cadastro ficou pela metade.
+- Cada login emite um refresh token novo (sessão nova); os das outras sessões continuam valendo.
+- Senha e tokens nunca vão para o log: o controller registra só a mensagem do erro.
+- Papéis e dados do perfil não entram no token: o JWT leva só o `sub`, e o front consulta o `GET /api/v1/me` do back-end.
 
 ### Rota interna (no back-end principal): `PUT /api/v1/internal/users/{authUserId}`
 
@@ -546,6 +574,7 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - **Envio de e-mail:** interface `EmailSender` injetada a partir do `index.js`, para trocar o provedor (ou usar um fake nos testes) sem mudar o caso de uso.
 - **Assinatura do JWT:** RS256. A chave privada fica só no Auth Server e assina os tokens; o back-end principal recebe só a chave pública e apenas valida. Nenhuma das chaves é versionada.
 - **Biblioteca do JWT:** `jose` (ADR-012): ES Modules, `async/await`, sem dependências, e amarra cada chave a um algoritmo.
+- **Login:** mesma resposta para e-mail inexistente e senha errada, com `argon2.verify` contra um hash falso quando a conta não existe (sem enumeração por mensagem nem por tempo). Conta `pending_provisioning` recebe `403` só depois da senha conferir. MFA fora do escopo (#296).
 - **Access token:** 15 min, claims `sub`, `iss`, `aud`, `iat` e `exp`, sem dados pessoais (ADR-012).
 - **Tokens:** access token curto + refresh token (Task #256). Armazenamento por plataforma conforme ADR-005: mobile em secure storage; web com refresh em cookie httpOnly/Secure/SameSite e access token em memória.
 - **Refresh token:** valor aleatório de 256 bits (não JWT), guardado só como SHA-256, validade de 30 dias, rotação a cada renovação e detecção de reuso revogando todos os tokens da conta. O access token não é revogável; o refresh é, no banco.
@@ -576,3 +605,4 @@ Permite renovar o access token (JWT) sem pedir a senha de novo e revogar o acess
 - Rota interna no back-end (`PUT /api/v1/internal/users/{authUserId}`), com `users.auth_user_id` UNIQUE, criação do TUTOR com o nome e `users.password` deixando de ser obrigatório.
 - Mover o timeout (3 s) e as tentativas (3) do `HttpUserProvisioner` para variáveis de ambiente, se precisar ajustar por ambiente.
 - User agent / dados do dispositivo na sessão (depois).
+- Limite de tentativas de login por e-mail ou IP (força bruta na senha): ver os testes de segurança do login (#301).

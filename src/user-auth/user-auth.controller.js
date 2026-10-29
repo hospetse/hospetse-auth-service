@@ -1,4 +1,4 @@
-import { registerService } from "./user-auth.service.js";
+import { loginService, registerService } from "./user-auth.service.js";
 import Joi from 'joi'
 import { AppError } from "../lib/app-error.js";
 
@@ -32,5 +32,32 @@ export function createRegisterController(userProvisioner) {
             return res.status(500).json({ error: 'Não foi possível concluir o cadastro' });
         }
 
+    }
+}
+
+const loginSchema = Joi.object({
+    email: Joi.string().trim().email().lowercase().max(255).required(), // mesma normalização do request-pin
+    password: Joi.string().required()
+}).required();  // Contrato da API
+
+export function createLoginController() {
+    return async (req, res) => {
+
+        const response = loginSchema.validate(req.body)
+
+        if (response.error) {
+            return res.status(400).json({ error: response.error.message })
+        }
+
+        try {
+            const result = await loginService(response.value);
+            res.status(200).json(result);
+        } catch (error) {
+            if (error instanceof AppError) {
+                return res.status(error.statusCode).json({ error: error.message });
+            }
+            console.log(error.message) // só a mensagem: senha e tokens nunca vão para o log
+            return res.status(500).json({ error: 'Não foi possível fazer o login' });
+        }
     }
 }
