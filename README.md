@@ -244,8 +244,10 @@ Gera um PIN, envia por e-mail e cria uma `email_verification`.
 Request:
 
 ```json
-{ "email": "tutor@exemplo.com", "name": "Maria Silva" }
+{ "email": "tutor@exemplo.com" }
 ```
+
+Só o e-mail: qualquer outro campo responde `400`. O nome vai depois, no `register`.
 
 | Status | Caso | Body |
 | --- | --- | --- |
