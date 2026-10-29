@@ -126,3 +126,36 @@ export async function registerService({ challengeId, pin, password, name, termsV
         throw error;
     }
 };
+
+// hash de uma senha que ninguém sabe: o login roda o argon2.verify mesmo quando o e-mail não existe,
+// para o tempo de resposta não contar quais e-mails têm conta. Gerado no primeiro login (é lento de propósito)
+let dummyPasswordHash;
+
+export async function loginService({ email, password }) {
+
+    // a mesma mensagem para e-mail inexistente e senha errada: não conta ao cliente qual dos dois falhou
+    const invalidCredentials = new AppError("E-mail ou senha inválidos", 401);
+
+    const userAuth = await prisma.userAuth.findUnique({
+        where: { email }
+    });
+
+    dummyPasswordHash ??= await argon2.hash(crypto.randomUUID());
+    const isPasswordValid = await argon2.verify(userAuth?.passwordHash ?? dummyPasswordHash, password);
+    if (!userAuth || !isPasswordValid) { throw invalidCredentials }
+
+    // só depois da senha certa: quem não sabe a senha não descobre que existe um cadastro pela metade
+    if (userAuth.status !== 'active') {
+        throw new AppError("Cadastro não concluído: peça um novo código para terminar o cadastro", 403)
+    }
+
+    const accessToken = await signAccessToken(userAuth.id);
+    const refreshToken = await issueRefreshToken(userAuth.id);
+
+    return {
+        accessToken,
+        tokenType: 'Bearer',
+        expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+        refreshToken
+    };
+};
