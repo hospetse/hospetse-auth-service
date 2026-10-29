@@ -107,6 +107,8 @@ prisma/schema.prisma     modelos do banco
 prisma/migrations/       histórico de migrations (versionado)
 prisma.config.ts         configuração do Prisma CLI
 docs/openapi.yaml        contrato OpenAPI 3.1 das rotas
+docs/index.html          página do Swagger UI servida em /docs
+railway.json             configuração do serviço no Railway (health check em /health)
 test/app.test.js         testes do /health
 test/request-pin.test.js testes do request-pin
 test/register.test.js    testes do register
@@ -120,7 +122,7 @@ test/http.user-provisioner.test.js  testes do HttpUserProvisioner contra um back
 
 ### Banco e migrations
 
-O banco é exclusivo do Auth Server, então em desenvolvimento dá para criar migrations com `npx prisma migrate dev --name <nome>` depois de alterar o `schema.prisma`. Antes, confirmar que a `DATABASE_URL` aponta para o banco do Auth, e não para o do back-end. Em deploy, usar só `npx prisma migrate deploy`.
+O banco é exclusivo do Auth Server, então em desenvolvimento dá para criar migrations com `npx prisma migrate dev --name <nome>` depois de alterar o `schema.prisma`. Antes, confirmar que a `DATABASE_URL` aponta para o banco do Auth, e não para o do back-end. Em deploy, só `npx prisma migrate deploy`, que o container já roda sozinho ao subir (CMD do `Dockerfile`): se uma migration falhar, o container não sobe e o deploy falha à vista.
 
 Para checar a conexão pelo terminal:
 
@@ -217,7 +219,7 @@ Front-end ──(rotas públicas)──> Auth Server ──(rota interna)──>
 
 Padrão (#56): prefixo `/api/v1/`, envelope de resposta e erro padronizado. Ações usam `POST` com o verbo no caminho.
 
-O contrato de todas as rotas está em [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.1). Para validar: `npx @redocly/cli lint docs/openapi.yaml`.
+O contrato de todas as rotas está em [`docs/openapi.yaml`](docs/openapi.yaml) (OpenAPI 3.1), navegável em `GET /docs` (Swagger UI) no servidor local e em produção: https://auth-service-production-36e0.up.railway.app/docs. Para validar: `npx @redocly/cli lint docs/openapi.yaml`.
 
 ### Status HTTP usados
 
