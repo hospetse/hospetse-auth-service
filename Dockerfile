@@ -23,5 +23,6 @@ USER node
 
 EXPOSE 3001
 
-# As variáveis vêm do ambiente (Railway ou --env-file), não de um .env dentro da imagem
-CMD ["node", "index.js"]
+# As variáveis vêm do ambiente (Railway ou --env-file), não de um .env dentro da imagem.
+# Aplica as migrations pendentes antes de subir: se uma falhar, o container não sobe e o deploy falha à vista
+CMD ["sh", "-c", "npx prisma migrate deploy && node index.js"]

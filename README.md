@@ -122,7 +122,7 @@ test/http.user-provisioner.test.js  testes do HttpUserProvisioner contra um back
 
 ### Banco e migrations
 
-O banco é exclusivo do Auth Server, então em desenvolvimento dá para criar migrations com `npx prisma migrate dev --name <nome>` depois de alterar o `schema.prisma`. Antes, confirmar que a `DATABASE_URL` aponta para o banco do Auth, e não para o do back-end. Em deploy, usar só `npx prisma migrate deploy`.
+O banco é exclusivo do Auth Server, então em desenvolvimento dá para criar migrations com `npx prisma migrate dev --name <nome>` depois de alterar o `schema.prisma`. Antes, confirmar que a `DATABASE_URL` aponta para o banco do Auth, e não para o do back-end. Em deploy, só `npx prisma migrate deploy`, que o container já roda sozinho ao subir (CMD do `Dockerfile`): se uma migration falhar, o container não sobe e o deploy falha à vista.
 
 Para checar a conexão pelo terminal:
 
