@@ -106,6 +106,9 @@ paths:
           description: Reenvio antes do intervalo mínimo (60 s)
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '500': { $ref: '#/components/responses/InternalError' }
+        '503':
+          description: Provedor de e-mail falhou ou não respondeu; nenhum PIN fica salvo e o cliente pode tentar de novo
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/v1/auth/register:
     post:
