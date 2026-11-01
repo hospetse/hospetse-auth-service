@@ -51,8 +51,8 @@ export async function requestPinService(email, emailSender) {
 
         await emailSender.send({
             to: email,
-            subject: "PIN",
-            text: pin
+            subject: "Seu código de verificação do Hospetse",
+            text: `Seu código de verificação é ${pin}.\n\nEle vale por 15 minutos. Se você não pediu este código, ignore este e-mail.`
         });
 
         return created;

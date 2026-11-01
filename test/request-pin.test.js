@@ -51,7 +51,7 @@ test('request-pin: e-mail válido retorna 201 com challengeId e envia o PIN', as
         where: { id: response.data.challengeId }
     });
     assert.strictEqual(challenge.email, email);
-    assert.notStrictEqual(challenge.pinHash, message.text);
+    assert.notStrictEqual(challenge.pinHash, message.text.match(/\d{6}/)[0]);
 });
 
 test('request-pin: pedir de novo antes de 60 s retorna 429 e não envia outro e-mail', async () => {

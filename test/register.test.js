@@ -61,7 +61,7 @@ test('register: PIN e payload válidos criam o USER no back-end, ativam a user_a
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     const response = await axios.post(`http://localhost:${port}/api/v1/auth/register`,
         { challengeId: pinResponse.data.challengeId, pin, password, name: 'Tutor Teste', acceptedTerms: true, termsVersion: 'v1' }
@@ -102,7 +102,7 @@ test('register: PIN errado retorna 401, conta tentativa e não cria identidade',
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
     const wrongPin = pin === '000000' ? '111111' : '000000';
 
     const response = await axios.post(`http://localhost:${port}/api/v1/auth/register`,
@@ -129,7 +129,7 @@ test('register: limite de tentativas retorna 429 mesmo com o PIN certo', async (
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     // Simula as 5 tentativas erradas sem precisar fazer 5 requisições.
     await prisma.emailVerification.update({
@@ -154,7 +154,7 @@ test('register: PIN expirado retorna 410 e não cria identidade', async () => {
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     // "Vence" o PIN, sem esperar os 15 min.
     await prisma.emailVerification.update({
@@ -179,7 +179,7 @@ test('register: PIN invalidado por um reenvio retorna 410', async () => {
     const first = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const firstPin = emailSender.sent.find((message) => message.to === email).text;
+    const firstPin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     // "Envelhece" o primeiro pedido para o reenvio passar do 429.
     await prisma.emailVerification.update({
@@ -207,7 +207,7 @@ test('register: reutilizar um PIN já consumido retorna 410', async () => {
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
     const body = { challengeId: pinResponse.data.challengeId, pin, password: 'senha-forte-123', name: 'Tutor Teste', acceptedTerms: true, termsVersion: 'v1' };
 
     const first = await axios.post(`http://localhost:${port}/api/v1/auth/register`, body);
@@ -230,7 +230,7 @@ test('register: e-mail com user_auth ativa retorna 409 e desfaz o consumo do PIN
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     // Conta ativada depois do pedido do PIN (o request-pin já barra se estivesse ativa antes).
     await prisma.userAuth.create({
@@ -262,7 +262,7 @@ test('register: back-end responde 409 retorna 409 e a user_auth fica pending', a
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     userProvisioner.error = new AppError("E-mail já cadastrado", 409);
     const response = await axios.post(`http://localhost:${port}/api/v1/auth/register`,
@@ -286,7 +286,7 @@ test('register: retentativa depois de falha no back-end reaproveita o mesmo auth
     const first = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const firstPin = emailSender.sent.find((message) => message.to === email).text;
+    const firstPin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     // Primeira tentativa: back-end fora (503). A user_auth fica pending.
     userProvisioner.error = new AppError("Não foi possível concluir o cadastro. Tente novamente", 503);
@@ -309,7 +309,7 @@ test('register: retentativa depois de falha no back-end reaproveita o mesmo auth
     const second = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const secondPin = emailSender.sent.findLast((message) => message.to === email).text;
+    const secondPin = emailSender.sent.findLast((message) => message.to === email).text.match(/\d{6}/)[0];
 
     const secondRegister = await axios.post(`http://localhost:${port}/api/v1/auth/register`,
         { challengeId: second.data.challengeId, pin: secondPin, password: 'outra-senha-456', name: 'Tutor Teste', acceptedTerms: true, termsVersion: 'v2' }
@@ -334,7 +334,7 @@ test('register: retentativa com o mesmo challenge depois de falha no back-end re
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
     const body = { challengeId: pinResponse.data.challengeId, pin, password: 'senha-forte-123', name: 'Tutor Teste', acceptedTerms: true, termsVersion: 'v1' };
 
     // Primeira tentativa: back-end fora. O challenge é consumido e a user_auth fica pending.
