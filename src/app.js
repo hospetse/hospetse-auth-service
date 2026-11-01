@@ -1,13 +1,16 @@
 import { createRequestPinController } from "./email-verification/email-verification.controller.js";
 import { prisma } from "./lib/prisma.js";
 import express from "express";
+import cors from "cors";
 import { fileURLToPath } from "node:url";
 import { createLoginController, createRegisterController } from "./user-auth/user-auth.controller.js";
 import { createRefreshController } from "./refresh-token/refresh-token.controller.js";
 
-export function createApp({ emailSender, userProvisioner }) {
+export function createApp({ emailSender, userProvisioner, corsOrigins = [] }) {
     const app = express();
 
+    // CORS (#516): só as origens do CORS_ORIGINS chamam o Auth pelo navegador
+    app.use(cors({ origin: corsOrigins }));
     app.use(express.json());
 
     app.get('/health', async (req, res) => {
