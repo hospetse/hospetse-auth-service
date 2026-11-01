@@ -52,7 +52,7 @@ test('refresh: o cadastro devolve o refresh token e o banco guarda só o hash', 
     const pinResponse = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`,
         { email }
     );
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
 
     const response = await axios.post(`http://localhost:${port}/api/v1/auth/register`,
         { challengeId: pinResponse.data.challengeId, pin, password: 'senha-forte-123', name: 'Tutor Teste', acceptedTerms: true, termsVersion: 'v1' }

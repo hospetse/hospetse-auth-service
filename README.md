@@ -80,6 +80,8 @@ Conferir: `GET http://localhost:<PORT>/health` deve responder `200`.
 | `INTERNAL_SERVICE_TOKEN` | Segredo compartilhado com o back-end, enviado como `Authorization: Bearer` na rota interna. Mesmo valor nos dois serviços. Gerar com `openssl rand -hex 32` |
 | `JWT_PRIVATE_KEY` | Chave privada RSA (PEM, PKCS#8) que assina os JWT. Existe só no Auth Server |
 | `JWT_PUBLIC_KEY` | Chave pública RSA (PEM, SPKI) do mesmo par. É a única que vai para o back-end principal |
+| `RESEND_API_KEY` | Chave da API do Resend, com permissão só de envio. Vazia, o `index.js` usa o `ConsoleEmailSender` e o PIN aparece no terminal. Obrigatória em produção |
+| `EMAIL_FROM` | Remetente do e-mail do PIN, num domínio verificado no Resend (ex.: `"Hospetse <no-reply@hospetse.com.br>"`) |
 
 Para gerar um `PIN_HMAC_SECRET`:
 
@@ -126,6 +128,7 @@ src/email-verification/
   email-sender.interface.js          contrato EmailSender: send({ to, subject, text })
   console.email-sender.js            implementação de dev (mostra o e-mail no terminal)
   fake.email-sender.js               implementação de testes (guarda as mensagens)
+  resend.email-sender.js             implementação real (POST /emails na API do Resend, timeout de 5 s, sem retry)
 src/user-auth/
   user-auth.controller.js            valida o payload do register e do login (Joi)
   user-auth.service.js               regras do register (PIN, tentativas, hash da senha, transação, provisionamento) e do login
@@ -178,7 +181,8 @@ O service não conhece o provedor de e-mail. Ele depende só do contrato `EmailS
 
 | Implementação | Uso |
 | --- | --- |
-| `ConsoleEmailSender` | Desenvolvimento: mostra o e-mail (com o PIN) no terminal. Nunca usar em produção |
+| `ResendEmailSender` | Produção: envia pela API do Resend quando `RESEND_API_KEY` está definida. Falha (resposta fora de 2xx ou timeout de 5 s) vira `AppError` 503, e a transação desfaz o PIN. Sem retry, porque repetir o envio depois de um timeout poderia mandar dois e-mails |
+| `ConsoleEmailSender` | Desenvolvimento: mostra o e-mail (com o PIN) no terminal. Usado quando `RESEND_API_KEY` está vazia. Nunca usar em produção |
 | `FakeEmailSender` | Testes: guarda as mensagens em `sent`, para o teste ler o PIN |
 
 O sender é injetado de cima para baixo: `index.js` → `createApp({ emailSender })` → `createRequestPinController(emailSender)` → `requestPinService(email, emailSender)`. O `index.js` é o único lugar que escolhe a implementação (composition root). Para ligar um provedor real, basta criar uma classe que estende `EmailSender` e passá-la no `index.js`, sem mudar o service.
@@ -289,6 +293,7 @@ Só o e-mail: qualquer outro campo responde `400`. O nome vai depois, no `regist
 | `400` | E-mail inválido | erro padrão |
 | `409` | E-mail já cadastrado em `user_auth` com status `active` | erro padrão (front redireciona para o login) |
 | `429` | Pediu reenvio antes do intervalo mínimo | erro padrão |
+| `503` | Provedor de e-mail falhou ou não respondeu. Nenhum PIN fica salvo | erro padrão |
 | `500` | Falha inesperada, inclusive no envio do e-mail | erro padrão |
 
 - E-mail com `user_auth` em `pending_provisioning` não é duplicado: pode pedir PIN novo (ver [Retentativa](#retentativa)).

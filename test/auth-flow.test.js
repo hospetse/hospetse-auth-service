@@ -52,7 +52,7 @@ const password = 'senha-forte-123';
 
 async function requestPin(email) {
     const response = await axios.post(`http://localhost:${port}/api/v1/auth/request-pin`, { email });
-    const pin = emailSender.sent.find((message) => message.to === email).text;
+    const pin = emailSender.sent.find((message) => message.to === email).text.match(/\d{6}/)[0];
     return { challengeId: response.data.challengeId, pin };
 }
 
