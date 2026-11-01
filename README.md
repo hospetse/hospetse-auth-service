@@ -13,6 +13,38 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 - A rota interna `PUT /api/v1/internal/users/{authUserId}` existe no back-end (#261) e é autenticada pelo segredo compartilhado `INTERNAL_SERVICE_TOKEN` (#473). Sem o back-end no ar ou com o token diferente, o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
+## Seed de demonstração (#497)
+
+Execute primeiro o seed do `hospetse-backend`, depois este, nos bancos do mesmo ambiente. Com as dependências instaladas e `DATABASE_URL` do Auth no `.env`, aplique `npx prisma migrate deploy`. Preencha `SEED_ADMIN_PASSWORD` e `SEED_TUTOR_PASSWORD` no `.env` privado (campos vazios no `.env.example`) e execute:
+
+```bash
+npx prisma db seed
+```
+
+| E-mail de demonstração | Senha configurada por |
+| --- | --- |
+| `admin@hospetse.dev` | `SEED_ADMIN_PASSWORD` |
+| `tutor.completo@hospetse.dev` | `SEED_TUTOR_PASSWORD` |
+| `tutor.incompleto@hospetse.dev` | `SEED_TUTOR_PASSWORD` |
+
+Não versione nem registre senhas reais em log. As três identidades ficam `active`, com hash Argon2 pelo mesmo mecanismo do cadastro. `termsVersion: seed` identifica contas de demonstração, não representa aceite de termos por uma pessoa. UUIDs/e-mails de `prisma/seed-accounts.js` devem ser iguais aos do back-end; o UUID será o `sub` do JWT. Não há senha padrão nem nova política de senha; a decisão continua na #252.
+
+Reexecutar não duplica identidades: atualiza as senhas a partir do ambiente, preserva `provisionedAt` e revoga os refresh tokens dessas contas na mesma transação. Access tokens já emitidos continuam válidos até expirar (15 minutos). Conflito de UUID/e-mail ou conta sem a marca `termsVersion: seed` aborta tudo, sem alterar credenciais existentes. Investigue o conflito sem excluir contas reais.
+
+`[assunção]` (#497) Como não existe a rota de serviço de seed no Auth citada no card, cada repositório possui um seed manual que acessa apenas seu próprio banco. Não há transação entre serviços nem verificação automática do banco do back-end. Execute na ordem indicada; em falha, corrija e repita. O seed não entra no Dockerfile ou no pipeline.
+
+Validação manual: `POST /api/v1/auth/login` com cada e-mail e a senha configurada deve retornar `200`. Use o access token em `GET /api/v1/me` no back-end; o Tutor completo deve ter `canContract: true` e três pets em `GET /api/v1/me/pets`. O incompleto deve ter `canContract: false`.
+
+### Teste isolado do seed
+
+Configure `SEED_TEST_DATABASE_URL` no processo apontando para PostgreSQL local **vazio e descartável**, com nome terminado em `_seed_test`. Aplique as migrations com `DATABASE_URL` apontando para esse mesmo banco. Execute:
+
+```bash
+node --test test/seed.test.js
+```
+
+O teste gera senhas e chaves temporárias, valida login HTTP das três contas, `sub`, idempotência, revogação dos refresh tokens, configuração ausente e rollback em conflito. Remove somente as contas reservadas criadas no teste. `npm test` também o descobre, mas o ignora sem `SEED_TEST_DATABASE_URL`; não há fallback para o Railway. Rode separadamente dos demais testes de banco, pois exige banco vazio.
+
 ## Stack
 
 - Node.js 22.9+ (usa a flag `--env-file-if-exists`), ES Modules
