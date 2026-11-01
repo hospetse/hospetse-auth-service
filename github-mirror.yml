@@ -1,0 +1,20 @@
+# Espelha o repo do Azure no GitHub (hospetse/<mesmo nome>) a cada push
+trigger:
+  branches:
+    include: ['*']
+pr: none
+
+variables:
+  - group: github   # GITHUB_TOKEN (secret)
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: none
+  - script: |
+      git clone --mirror "https://$(System.AccessToken)@dev.azure.com/escola-ti/Hospetse/_git/$(Build.Repository.Name)" repo.git
+      cd repo.git
+      git push --prune "https://x-access-token:$(GITHUB_TOKEN)@github.com/hospetse/$(Build.Repository.Name).git" \
+        '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
+    displayName: Espelhar no GitHub
