@@ -26,8 +26,9 @@ npx prisma db seed
 | `admin@hospetse.dev` | `SEED_ADMIN_PASSWORD` |
 | `tutor.completo@hospetse.dev` | `SEED_TUTOR_PASSWORD` |
 | `tutor.incompleto@hospetse.dev` | `SEED_TUTOR_PASSWORD` |
+| `host.aberto@`, `host.caes@`, `host.gatos@`, `host.racas@`, `host.pendente@` e `host.inativo@hospetse.dev` (#498) | `SEED_TUTOR_PASSWORD` |
 
-Não versione nem registre senhas reais em log. As três identidades ficam `active`, com hash Argon2 pelo mesmo mecanismo do cadastro. `termsVersion: seed` identifica contas de demonstração, não representa aceite de termos por uma pessoa. UUIDs/e-mails de `prisma/seed-accounts.js` devem ser iguais aos do back-end; o UUID será o `sub` do JWT. Não há senha padrão nem nova política de senha; a decisão continua na #252.
+Não versione nem registre senhas reais em log. Todas as identidades do seed ficam `active`, com hash Argon2 pelo mesmo mecanismo do cadastro. `termsVersion: seed` identifica contas de demonstração, não representa aceite de termos por uma pessoa. UUIDs/e-mails de `prisma/seed-accounts.js` devem ser iguais aos do back-end; o UUID será o `sub` do JWT. Não há senha padrão nem nova política de senha; a decisão continua na #252.
 
 Reexecutar não duplica identidades: atualiza as senhas a partir do ambiente, preserva `provisionedAt` e revoga os refresh tokens dessas contas na mesma transação. Access tokens já emitidos continuam válidos até expirar (15 minutos). Conflito de UUID/e-mail ou conta sem a marca `termsVersion: seed` aborta tudo, sem alterar credenciais existentes. Investigue o conflito sem excluir contas reais.
 

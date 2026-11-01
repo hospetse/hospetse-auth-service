@@ -26,7 +26,7 @@ test('seed #497: login, idempotência, revogação e rollback', { skip: !process
     assert.equal(initial.status, 0, 'Primeira execução falhou.');
     for (const password of Object.values(passwords)) assert(!`${initial.stdout}${initial.stderr}`.includes(password));
     const first = await prisma.userAuth.findMany({ orderBy: { id: 'asc' } });
-    assert.equal(first.length, 3);
+    assert.equal(first.length, accounts.length);
     assert(first.every(user => user.status === 'active'));
 
     const { publicKey, privateKey } = await generateKeyPair('RS256', { extractable: true });

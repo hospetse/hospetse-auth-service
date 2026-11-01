@@ -28,10 +28,12 @@ try {
                 await tx.userAuth.create({ data: { id: account.id, email: account.email, termsVersion: 'seed', ...data } });
             }
         }
-    });
-    console.log('Seed concluído: 3 identidades ativas.');
+    // Três consultas por conta, em sequência, no banco remoto: os 5 s padrão não cobrem as contas dos Hosts (#498)
+    }, { timeout: 60000 });
+    console.log(`Seed concluído: ${accounts.length} identidades ativas.`);
 } catch (error) {
-    console.error(error instanceof AssertionError ? error.message : 'Falha no seed; transação revertida. Verifique a conexão e conflitos nos dados reservados.');
+    const code = /^P\d{4}$/.test(error.code) ? ` (${error.code})` : '';
+    console.error(error instanceof AssertionError ? error.message : `Falha no seed${code}; transação revertida. Verifique a conexão e conflitos nos dados reservados.`);
     process.exitCode = 1;
 } finally {
     await prisma.$disconnect();
