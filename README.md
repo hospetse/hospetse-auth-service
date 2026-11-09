@@ -13,7 +13,7 @@ Work item: PBI #244 (HSP-PBI-078). Arquitetura e contratos: Task #249 (HSP-PBI-0
 - A rota interna `PUT /api/v1/internal/users/{authUserId}` existe no back-end (#261) e é autenticada pelo segredo compartilhado `INTERNAL_SERVICE_TOKEN` (#473). Sem o back-end no ar ou com o token diferente, o `register` responde `503` (ver [Provisionamento no back-end](#provisionamento-no-back-end)).
 - O envio de e-mail ainda não tem provedor real: em desenvolvimento o e-mail aparece no terminal (ver [Envio de e-mail](#envio-de-e-mail)).
 
-## Seed de demonstração (#497)
+## Seed de demonstração (#497, #314)
 
 Execute primeiro o seed do `hospetse-backend`, depois este, nos bancos do mesmo ambiente. Com as dependências instaladas e `DATABASE_URL` do Auth no `.env`, aplique `npx prisma migrate deploy`. Preencha `SEED_ADMIN_PASSWORD` e `SEED_TUTOR_PASSWORD` no `.env` privado (campos vazios no `.env.example`) e execute:
 
@@ -32,6 +32,8 @@ Não versione nem registre senhas reais em log. Todas as identidades do seed fic
 
 Reexecutar não duplica identidades: atualiza as senhas a partir do ambiente, preserva `provisionedAt` e revoga os refresh tokens dessas contas na mesma transação. Access tokens já emitidos continuam válidos até expirar (15 minutos). Conflito de UUID/e-mail ou conta sem a marca `termsVersion: seed` aborta tudo, sem alterar credenciais existentes. Investigue o conflito sem excluir contas reais.
 
+Para recuperar a senha do Administrador de demonstração (#314 / DA-07), altere `SEED_ADMIN_PASSWORD` no `.env` e execute o seed de novo: o hash é atualizado e os refresh tokens dessas contas são revogados na mesma transação. Não há fluxo de “esqueci a senha” para Administrador pela interface.
+
 `[assunção]` (#497) Como não existe a rota de serviço de seed no Auth citada no card, cada repositório possui um seed manual que acessa apenas seu próprio banco. Não há transação entre serviços nem verificação automática do banco do back-end. Execute na ordem indicada; em falha, corrija e repita. O seed não entra no Dockerfile ou no pipeline.
 
 Validação manual: `POST /api/v1/auth/login` com cada e-mail e a senha configurada deve retornar `200`. Use o access token em `GET /api/v1/me` no back-end; o Tutor completo deve ter `canContract: true` e três pets em `GET /api/v1/me/pets`. O incompleto deve ter `canContract: false`.
@@ -44,7 +46,7 @@ Configure `SEED_TEST_DATABASE_URL` no processo apontando para PostgreSQL local *
 node --test test/seed.test.js
 ```
 
-O teste gera senhas e chaves temporárias, valida login HTTP das três contas, `sub`, idempotência, revogação dos refresh tokens, configuração ausente e rollback em conflito. Remove somente as contas reservadas criadas no teste. `npm test` também o descobre, mas o ignora sem `SEED_TEST_DATABASE_URL`; não há fallback para o Railway. Rode separadamente dos demais testes de banco, pois exige banco vazio.
+O teste gera senhas e chaves temporárias, valida login HTTP de todas as identidades do seed, `sub`, idempotência, revogação dos refresh tokens, configuração ausente e rollback em conflito. Remove somente as contas reservadas criadas no teste. `npm test` também o descobre, mas o ignora sem `SEED_TEST_DATABASE_URL`; não há fallback para o Railway. Rode separadamente dos demais testes de banco, pois exige banco vazio.
 
 ## Stack
 
